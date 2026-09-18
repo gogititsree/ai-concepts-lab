@@ -1,0 +1,7 @@
+{
+  "slug": "harnesses",
+  "title": "Harnesses",
+  "summary": "Implement the agent loop yourself in a worker, pass the scripted checks, then see what a production coding harness adds on top of those twenty lines.",
+  "orderIndex": 6,
+  "requiresModel": true
+}

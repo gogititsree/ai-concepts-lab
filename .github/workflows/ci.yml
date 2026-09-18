@@ -66,10 +66,61 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  integration:
+    name: Integration tests (Postgres)
+    runs-on: ubuntu-latest
+
+    # A real Postgres 16, same major version as production. The tests create and drop a
+    # throwaway database per test file, so the job needs a superuser -- which the default
+    # `postgres` service user is.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lab
+          POSTGRES_PASSWORD: lab
+          POSTGRES_DB: lab
+        ports:
+          - 5432:5432
+        # Without the healthcheck the steps start before Postgres accepts connections and
+        # the first test fails with ECONNREFUSED about one run in three.
+        options: >-
+          --health-cmd "pg_isready -U lab -d lab"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://lab:lab@localhost:5432/lab
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Only the shared contracts are needed: the api tests run from source via tsx/vitest.
+      - name: Build shared contracts
+        run: pnpm --filter @lab/shared run build
+
+      # Applying the migrations as their own step means a broken migration fails with a
+      # migration error rather than as a pile of confusing test failures.
+      - name: Run migrations
+        run: pnpm db:migrate
+
+      - run: pnpm --filter api run test:integration
+
   build-image:
     name: Build and push image
     runs-on: ubuntu-latest
-    needs: [lint, unit]
+    needs: [lint, unit, integration]
     permissions:
       contents: read
       packages: write

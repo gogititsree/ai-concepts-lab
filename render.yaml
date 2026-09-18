@@ -23,3 +23,8 @@ services:
       # polls that value. Not synced from this file, hence sync: false.
       - key: GIT_SHA
         sync: false
+      # Required since M4: the API refuses to boot without it. Set in the dashboard to the
+      # Neon connection string (sync: false keeps the secret out of the repo). Running the
+      # migrations as a Render pre-deploy command is M13's job.
+      - key: DATABASE_URL
+        sync: false

@@ -1,0 +1,7 @@
+{
+  "slug": "neurons",
+  "title": "Neurons & perceptrons",
+  "summary": "A neuron is a weighted sum plus a threshold. See that this is a line in two dimensions, and that one simple rule can move that line until it separates two classes of points.",
+  "orderIndex": 1,
+  "requiresModel": false
+}

@@ -1,0 +1,60 @@
+{
+  "title": "Agents & tool use quiz",
+  "passThreshold": 0.7,
+  "questions": [
+    {
+      "kind": "single_choice",
+      "promptMd": "After the harness executes a tool, what does it send back to the model on the next call?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Nothing; the model remembers the call"
+        },
+        {
+          "id": "b",
+          "textMd": "A new system prompt containing the result"
+        },
+        {
+          "id": "c",
+          "textMd": "A message with role `tool` containing the result, appended to the conversation"
+        },
+        {
+          "id": "d",
+          "textMd": "The result inside the next user message only"
+        }
+      ],
+      "correct": {
+        "optionIds": ["c"]
+      },
+      "explanationMd": "The model is stateless between calls, so the observation has to travel in the transcript. A `tool` message keeps it distinguishable from something the user said.",
+      "points": 1
+    },
+    {
+      "kind": "multi_choice",
+      "promptMd": "Which of these belong **server-side**, even though the model was already given the tool's JSON Schema? Select all that apply.",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Validating the tool arguments against the schema"
+        },
+        {
+          "id": "b",
+          "textMd": "Checking the tool name against an allow-list"
+        },
+        {
+          "id": "c",
+          "textMd": "Deciding how nicely to phrase the final answer"
+        },
+        {
+          "id": "d",
+          "textMd": "Enforcing a timeout on tool execution"
+        }
+      ],
+      "correct": {
+        "optionIds": ["a", "b", "d"]
+      },
+      "explanationMd": "The schema is a prompt, not a constraint: the model may still emit a wrong name or malformed arguments. Anything that protects the system has to be enforced where the execution happens.",
+      "points": 2
+    }
+  ]
+}

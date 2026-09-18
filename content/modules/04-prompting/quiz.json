@@ -1,0 +1,60 @@
+{
+  "title": "Prompting & structured output quiz",
+  "passThreshold": 0.7,
+  "questions": [
+    {
+      "kind": "single_choice",
+      "promptMd": "You need reproducible model outputs in an automated test. Which combination is most appropriate?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Temperature 1.0 and a fixed seed"
+        },
+        {
+          "id": "b",
+          "textMd": "Temperature 0 (or a fixed seed at temperature 0) against the real model"
+        },
+        {
+          "id": "c",
+          "textMd": "A fake provider returning scripted responses"
+        },
+        {
+          "id": "d",
+          "textMd": "top-p 0.1"
+        }
+      ],
+      "correct": {
+        "optionIds": ["c"]
+      },
+      "explanationMd": "CI has no model running, so only a fake provider is actually reproducible there. Option b is reasonable locally, but even temperature 0 is not guaranteed identical across model versions or hardware.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "A structured-output response fails Zod validation in production. What is the *first* thing that should happen?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Return the raw text to the user and let them sort it out"
+        },
+        {
+          "id": "b",
+          "textMd": "Increment a parse-failure metric, then retry once with the validation error fed back in"
+        },
+        {
+          "id": "c",
+          "textMd": "Silently substitute an empty object"
+        },
+        {
+          "id": "d",
+          "textMd": "Raise the temperature and try again"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "Every parse failure is a signal: count it, then recover. Silent substitution destroys the evidence, and raising the temperature makes valid output less likely, not more.",
+      "points": 1
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+[
+  {
+    "slug": "mlp-playground",
+    "title": "MLP playground",
+    "kind": "mlp",
+    "orderIndex": 1,
+    "lessonSlug": "stacking-neurons",
+    "config": {
+      "datasets": ["xor", "circle", "moons", "spiral"],
+      "hiddenSizes": [2, 3, 4, 5, 6, 7, 8],
+      "activations": ["sigmoid", "tanh"],
+      "defaultLr": 0.5,
+      "seed": 42,
+      "tasks": [
+        {
+          "id": "xor-converge",
+          "label": "Get loss below 0.05 on XOR within 2000 epochs",
+          "check": {
+            "dataset": "xor",
+            "loss": "<0.05",
+            "maxEpochs": 2000
+          }
+        },
+        {
+          "id": "circle-hidden-size",
+          "label": "Find the smallest hidden size above 95% on circle",
+          "check": {
+            "dataset": "circle",
+            "accuracy": ">0.95",
+            "record": "hiddenSize"
+          }
+        },
+        {
+          "id": "step-through",
+          "label": "Run at least one single-example forward and backward step",
+          "check": {
+            "singleSteps": ">=1"
+          }
+        }
+      ]
+    },
+    "completionRule": {
+      "type": "tasks",
+      "required": 2
+    }
+  }
+]

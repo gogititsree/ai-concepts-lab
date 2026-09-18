@@ -1,0 +1,7 @@
+{
+  "slug": "prompting",
+  "title": "Prompting & structured output",
+  "summary": "Treat the model as a component with an API: roles, sampling parameters, and output you can actually parse, validated with the same Zod schemas the rest of the app uses.",
+  "orderIndex": 4,
+  "requiresModel": true
+}

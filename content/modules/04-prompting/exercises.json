@@ -1,0 +1,57 @@
+[
+  {
+    "slug": "prompt-playground",
+    "title": "Prompt playground",
+    "kind": "prompt",
+    "orderIndex": 1,
+    "lessonSlug": "the-chat-api",
+    "config": {
+      "defaults": {
+        "temperature": 0.7,
+        "topP": 0.9,
+        "seed": null
+      },
+      "structuredOutput": {
+        "enabled": true
+      },
+      "tasks": [
+        {
+          "id": "three-bullets",
+          "label": "Get a response that is exactly three lines starting with '- '",
+          "check": {
+            "type": "regex",
+            "pattern": "^(- .+\\n){2}- .+$"
+          }
+        },
+        {
+          "id": "extract-dates",
+          "label": "Extract three ISO dates as JSON",
+          "check": {
+            "type": "schema",
+            "schemaId": "dates"
+          }
+        },
+        {
+          "id": "refuse-offtopic",
+          "label": "Make the model refuse an off-topic question",
+          "check": {
+            "type": "regex",
+            "pattern": "I can only help with AI concepts"
+          }
+        },
+        {
+          "id": "injection-resist",
+          "label": "Survive an instruction-override attempt",
+          "check": {
+            "type": "not_contains",
+            "value": "PWNED"
+          }
+        }
+      ]
+    },
+    "completionRule": {
+      "type": "tasks",
+      "required": 3
+    }
+  }
+]

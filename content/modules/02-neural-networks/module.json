@@ -1,0 +1,7 @@
+{
+  "slug": "neural-networks",
+  "title": "Neural networks & backpropagation",
+  "summary": "Stack neurons with a nonlinearity between them and XOR becomes solvable. Backpropagation is the chain rule, bookkept layer by layer -- and you can check it numerically.",
+  "orderIndex": 2,
+  "requiresModel": false
+}

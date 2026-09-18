@@ -13,6 +13,18 @@ const EnvSchema = z.object({
   // polls that field to confirm the running image is the commit it just pushed.
   GIT_SHA: z.string().min(1).default('dev'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  // No default on purpose: a mistyped or missing connection string must stop the process
+  // at boot, not silently connect to some other database.
+  DATABASE_URL: z
+    .string()
+    .min(1)
+    .refine(
+      (value) => value.startsWith('postgres://') || value.startsWith('postgresql://'),
+      'must be a postgres:// or postgresql:// connection string',
+    ),
+  // postgres.js opens connections lazily up to this many. Five is plenty for a solo app
+  // on a free tier (Neon counts connections), and integration tests set it to 1-2.
+  DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(5),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

@@ -8,7 +8,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 
 import { config as defaultConfig, type Config } from './config.js';
-import { healthRoutes } from './routes/health.js';
+import { healthRoutes, type HealthRoutesOptions } from './routes/health.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -22,6 +22,11 @@ export interface BuildAppOptions {
   webDistPath?: string;
   /** Escape hatch for tests that want to assert on logs. */
   logger?: FastifyServerOptions['logger'];
+  /**
+   * Dependency health probes. Unit tests stub `checkDb` so `GET /health` can be exercised
+   * without Postgres; everything else gets the real `SELECT 1`.
+   */
+  checks?: HealthRoutesOptions;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -75,7 +80,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     await app.register(cors, { origin: true, credentials: true });
   }
 
-  await app.register(healthRoutes, { prefix: '/api/v1' });
+  await app.register(healthRoutes, { prefix: '/api/v1', ...opts.checks });
 
   const webDistPath = opts.webDistPath ?? defaultWebDistPath;
   const serveSpa = cfg.NODE_ENV === 'production' && existsSync(webDistPath);

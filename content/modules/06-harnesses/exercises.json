@@ -1,0 +1,53 @@
+[
+  {
+    "slug": "build-a-harness",
+    "title": "Build a harness",
+    "kind": "harness",
+    "orderIndex": 1,
+    "lessonSlug": "the-harness-is-the-loop",
+    "config": {
+      "runtime": "web-worker",
+      "starterFile": "runAgent.stub.js",
+      "workerTools": ["calculator", "get_current_time", "lookup_glossary"],
+      "scriptedScenarios": ["single-tool", "malformed-args", "never-stops"],
+      "tasks": [
+        {
+          "id": "check-terminates",
+          "label": "The loop returns a final answer for the single-tool scenario",
+          "check": {
+            "scenario": "single-tool",
+            "expect": "final"
+          }
+        },
+        {
+          "id": "check-appends-tool-message",
+          "label": "Tool results are appended as tool messages",
+          "check": {
+            "scenario": "single-tool",
+            "expect": "toolMessageAppended"
+          }
+        },
+        {
+          "id": "check-max-iterations",
+          "label": "The loop stops at maxIterations when the model never finishes",
+          "check": {
+            "scenario": "never-stops",
+            "expect": "maxIterations"
+          }
+        },
+        {
+          "id": "real-run",
+          "label": "Optional: one successful run against the real model",
+          "check": {
+            "scenario": "real",
+            "expect": "final"
+          }
+        }
+      ]
+    },
+    "completionRule": {
+      "type": "tasks",
+      "required": 3
+    }
+  }
+]

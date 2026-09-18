@@ -1,0 +1,7 @@
+{
+  "slug": "agents",
+  "title": "Agents & tool use",
+  "summary": "An agent is a model plus tools plus a loop. Learn to read a trace fluently, and to name the failure modes before they bite you.",
+  "orderIndex": 5,
+  "requiresModel": true
+}

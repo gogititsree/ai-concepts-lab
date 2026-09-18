@@ -41,6 +41,16 @@ export default tseslint.config(
     },
   },
   {
+    // Build helper scripts: plain Node ESM, no TypeScript, so they need the Node globals
+    // that the .ts block above declares.
+    files: ['**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+  },
+  {
     files: ['apps/web/**/*.{ts,tsx}'],
     ...react.configs.flat.recommended,
     languageOptions: {

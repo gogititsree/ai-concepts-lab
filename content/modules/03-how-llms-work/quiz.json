@@ -1,0 +1,53 @@
+{
+  "title": "How LLMs work quiz",
+  "passThreshold": 0.7,
+  "questions": [
+    {
+      "kind": "single_choice",
+      "promptMd": "In scaled dot-product attention the raw scores are divided by $\\sqrt{d_k}$ before the softmax. Why?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "To make the weights sum to 1"
+        },
+        {
+          "id": "b",
+          "textMd": "To keep scores from growing with vector dimension so the softmax does not saturate"
+        },
+        {
+          "id": "c",
+          "textMd": "To normalise the value vectors"
+        },
+        {
+          "id": "d",
+          "textMd": "To speed up computation"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "Dot products of random vectors grow like $\\sqrt{d_k}$. Without the scaling, large scores push the softmax into a near one-hot regime where gradients vanish. Summing to 1 is the softmax's job, not the scaling's.",
+      "points": 1
+    },
+    {
+      "kind": "short_text",
+      "promptMd": "Which single operation guarantees that each row of attention weights sums to 1?",
+      "correct": {
+        "acceptable": ["softmax", "the softmax"],
+        "normalize": "lower_trim"
+      },
+      "explanationMd": "Softmax exponentiates the scores and divides by their sum, so every row is a probability distribution over the keys.",
+      "points": 1
+    },
+    {
+      "kind": "numeric",
+      "promptMd": "What is the cosine similarity of a non-zero vector with itself?",
+      "correct": {
+        "value": 1.0,
+        "tolerance": 0.001
+      },
+      "explanationMd": "Cosine similarity is the dot product divided by the product of the norms, which is exactly 1 when the two vectors are identical -- the angle between them is zero.",
+      "points": 1
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "title": "Neurons & perceptrons quiz",
+  "passThreshold": 0.7,
+  "questions": [
+    {
+      "kind": "single_choice",
+      "promptMd": "A perceptron has weights **w = (2, -1)**, bias **b = -1**, and a step activation (output 1 when z >= 0). What does it output for **x = (1, 1)**?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "0"
+        },
+        {
+          "id": "b",
+          "textMd": "1"
+        },
+        {
+          "id": "c",
+          "textMd": "0.5"
+        },
+        {
+          "id": "d",
+          "textMd": "undefined"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "z = 2*1 + (-1)*1 + (-1) = 0, and 0 >= 0, so the step activation outputs 1. Note how much rests on the `>=` convention: with a strict `>` the same input would output 0. State the convention.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Changing **only** the bias `b` of a two-input neuron does what to its decision boundary?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Rotates the line about the origin"
+        },
+        {
+          "id": "b",
+          "textMd": "Shifts the line without changing its direction"
+        },
+        {
+          "id": "c",
+          "textMd": "Nothing; the bias only affects the output scale"
+        },
+        {
+          "id": "d",
+          "textMd": "Makes the boundary curved"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "The weight vector `w` is normal to the line and sets its orientation; `b` only sets the offset along that normal. Rotation needs a change in `w`.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Which dataset can a **single** neuron never separate?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Two well-spaced blobs"
+        },
+        {
+          "id": "b",
+          "textMd": "Points split by a diagonal line"
+        },
+        {
+          "id": "c",
+          "textMd": "XOR"
+        },
+        {
+          "id": "d",
+          "textMd": "Any dataset with more than 50 points"
+        }
+      ],
+      "correct": {
+        "optionIds": ["c"]
+      },
+      "explanationMd": "XOR is not linearly separable: no single straight line puts both positive points on one side. That limitation is exactly what Module 2 fixes by stacking neurons.",
+      "points": 1
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "slug": "how-llms-work",
+  "title": "How LLMs work",
+  "summary": "Three ideas sit under every language model: text becomes tokens, tokens become vectors, and attention mixes those vectors by relevance. Build each one and watch it run.",
+  "orderIndex": 3,
+  "requiresModel": false
+}

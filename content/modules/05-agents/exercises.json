@@ -1,0 +1,57 @@
+[
+  {
+    "slug": "agent-loop",
+    "title": "Agent loop with tools",
+    "kind": "agent",
+    "orderIndex": 1,
+    "lessonSlug": "what-makes-an-agent",
+    "config": {
+      "toolCatalog": [
+        "calculator",
+        "get_current_time",
+        "unit_convert",
+        "lookup_glossary",
+        "fake_weather"
+      ],
+      "allowMockTools": true,
+      "defaultMaxIterations": 6,
+      "tasks": [
+        {
+          "id": "compound-interest",
+          "label": "Get a correct compound-interest answer via the calculator tool",
+          "check": {
+            "toolCalled": "calculator",
+            "answerWithinPercent": 1
+          }
+        },
+        {
+          "id": "must-check-time",
+          "label": "Make the agent call get_current_time before answering",
+          "check": {
+            "toolCallBeforeFinal": "get_current_time"
+          }
+        },
+        {
+          "id": "mock-tool",
+          "label": "Define a mock tool and get the agent to use it",
+          "check": {
+            "mockToolCalled": true,
+            "parseOk": true
+          }
+        },
+        {
+          "id": "observe-failure",
+          "label": "Run the sabotage scenario and write a one-line reflection",
+          "check": {
+            "scenario": "sabotage",
+            "reflection": true
+          }
+        }
+      ]
+    },
+    "completionRule": {
+      "type": "tasks",
+      "required": 2
+    }
+  }
+]

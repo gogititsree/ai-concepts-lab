@@ -1,0 +1,52 @@
+[
+  {
+    "slug": "tokens-embeddings-attention",
+    "title": "Tokens, embeddings and attention",
+    "kind": "tokenizer",
+    "orderIndex": 1,
+    "lessonSlug": "text-to-tokens-bpe",
+    "config": {
+      "tabs": ["tokenizer", "embeddings", "attention"],
+      "tokenizer": {
+        "corpus": "bundled-5kb",
+        "mergeRange": [50, 500],
+        "defaultMerges": 200
+      },
+      "embeddings": {
+        "wordListId": "clusters-40",
+        "fallbackFile": "embeddings-precomputed.json"
+      },
+      "attention": {
+        "sentence": "the cat sat on the mat because it was warm",
+        "dim": 3
+      },
+      "tasks": [
+        {
+          "id": "tokenize-three",
+          "label": "Tokenize the three provided sentences and answer the count question",
+          "check": {
+            "sentencesTokenized": 3
+          }
+        },
+        {
+          "id": "find-neighbour",
+          "label": "Report the nearest word to the given one",
+          "check": {
+            "answer": "nearestWord"
+          }
+        },
+        {
+          "id": "attention-row",
+          "label": "Identify which word 'it' attends to most",
+          "check": {
+            "answer": "attentionArgmax"
+          }
+        }
+      ]
+    },
+    "completionRule": {
+      "type": "tasks",
+      "required": 2
+    }
+  }
+]

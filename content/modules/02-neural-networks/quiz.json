@@ -1,0 +1,70 @@
+{
+  "title": "Neural networks & backpropagation quiz",
+  "passThreshold": 0.7,
+  "questions": [
+    {
+      "kind": "single_choice",
+      "promptMd": "For a single output neuron with sigmoid activation and loss $L = \\tfrac12 (y - \\hat y)^2$, where $\\hat y = \\sigma(z)$, what is $\\partial L/\\partial z$?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "$(\\hat y - y)$"
+        },
+        {
+          "id": "b",
+          "textMd": "$(\\hat y - y)\\,\\hat y(1 - \\hat y)$"
+        },
+        {
+          "id": "c",
+          "textMd": "$\\hat y(1 - \\hat y)$"
+        },
+        {
+          "id": "d",
+          "textMd": "$(y - \\hat y)\\,z$"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "Chain rule: $\\partial L/\\partial \\hat y = (\\hat y - y)$ and $\\partial \\hat y/\\partial z = \\hat y(1-\\hat y)$. Multiply them.",
+      "points": 1
+    },
+    {
+      "kind": "numeric",
+      "promptMd": "With the same network, $\\hat y = 0.8$ and $y = 1$. Compute $\\partial L/\\partial z$.",
+      "correct": {
+        "value": -0.032,
+        "tolerance": 0.005
+      },
+      "explanationMd": "$(0.8 - 1) \\times 0.8 \\times 0.2 = -0.2 \\times 0.16 = -0.032$. The sign says the update should push `z` up, which pushes the prediction towards 1.",
+      "points": 2
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Why does gradient checking use a **central** difference $(L(w+\\epsilon) - L(w-\\epsilon))/2\\epsilon$ rather than a forward difference?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "It needs one fewer evaluation of the loss"
+        },
+        {
+          "id": "b",
+          "textMd": "Its error is $O(\\epsilon^2)$ rather than $O(\\epsilon)$, so it agrees with the analytic gradient to far more digits"
+        },
+        {
+          "id": "c",
+          "textMd": "It works even when the loss is not differentiable"
+        },
+        {
+          "id": "d",
+          "textMd": "It avoids floating-point arithmetic"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "The first-order error terms cancel in the central difference, which is what makes a relative-error threshold of 1e-6 a meaningful test rather than a coin flip.",
+      "points": 1
+    }
+  ]
+}

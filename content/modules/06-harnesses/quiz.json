@@ -1,0 +1,60 @@
+{
+  "title": "Harnesses quiz",
+  "passThreshold": 0.7,
+  "questions": [
+    {
+      "kind": "single_choice",
+      "promptMd": "Your harness has no maximum-iteration cap. Which failure is *most* likely to make it unusable?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "The model refuses to call any tool"
+        },
+        {
+          "id": "b",
+          "textMd": "The model returns valid JSON every time"
+        },
+        {
+          "id": "c",
+          "textMd": "The model keeps calling a tool whose result never satisfies it, consuming time and tokens indefinitely"
+        },
+        {
+          "id": "d",
+          "textMd": "The tool returns a very large result"
+        }
+      ],
+      "correct": {
+        "optionIds": ["c"]
+      },
+      "explanationMd": "Nothing in the model guarantees termination. The cap is the only thing that turns an unbounded loop into a bounded, billable, debuggable one.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Which SLI would reveal a broken tool schema first?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "p95 model latency"
+        },
+        {
+          "id": "b",
+          "textMd": "Tool-call parse-failure rate"
+        },
+        {
+          "id": "c",
+          "textMd": "Runs started per hour"
+        },
+        {
+          "id": "d",
+          "textMd": "Average tokens per run"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "A schema the model cannot satisfy shows up immediately as arguments that fail validation. Latency and volume barely move; token counts drift only after the retries pile up.",
+      "points": 1
+    }
+  ]
+}

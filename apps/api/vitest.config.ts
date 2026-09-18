@@ -1,6 +1,11 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
+/**
+ * Unit suite. Integration tests live in `test/integration/` and are excluded here: they
+ * need a real Postgres, and `pnpm test` must stay runnable on a laptop with nothing
+ * running. See `vitest.integration.config.ts`.
+ */
 export default defineConfig({
   resolve: {
     alias: {
@@ -12,6 +17,13 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
-    env: { NODE_ENV: 'test' },
+    exclude: ['test/integration/**'],
+    env: {
+      NODE_ENV: 'test',
+      // src/config.ts requires DATABASE_URL, and importing the app reaches it. No unit
+      // test opens a socket (postgres.js connects lazily), so any valid URL will do;
+      // a real one from the environment is preferred so the value is never misleading.
+      DATABASE_URL: process.env.DATABASE_URL ?? 'postgres://lab:lab@localhost:5432/lab',
+    },
   },
 });

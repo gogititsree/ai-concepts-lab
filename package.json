@@ -16,7 +16,14 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "test:unit": "pnpm -r run test:unit",
-    "test:coverage": "pnpm -r run test:coverage"
+    "test:coverage": "pnpm -r run test:coverage",
+    "db:up": "docker compose -f docker/docker-compose.yml up -d --wait postgres",
+    "db:down": "docker compose -f docker/docker-compose.yml down",
+    "db:generate": "pnpm --filter api run db:generate",
+    "db:migrate": "pnpm --filter api run db:migrate",
+    "db:seed": "pnpm --filter @lab/shared run build && pnpm --filter api run db:seed",
+    "db:studio": "pnpm --filter api run db:studio",
+    "test:integration": "pnpm --filter api run test:integration"
   },
   "devDependencies": {
     "@eslint/js": "^9.37.0",

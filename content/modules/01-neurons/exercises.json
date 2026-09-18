@@ -1,0 +1,35 @@
+[
+  {
+    "slug": "perceptron-playground",
+    "title": "Perceptron playground",
+    "kind": "perceptron",
+    "orderIndex": 1,
+    "lessonSlug": "what-a-neuron-computes",
+    "config": {
+      "datasets": ["blobs", "diagonal", "xor"],
+      "defaultLr": 0.1,
+      "tasks": [
+        {
+          "id": "separate-blobs",
+          "label": "Reach 100% accuracy on the blobs dataset",
+          "check": {
+            "dataset": "blobs",
+            "accuracy": 1.0
+          }
+        },
+        {
+          "id": "try-xor",
+          "label": "Run at least 20 epochs on XOR and watch it fail",
+          "check": {
+            "dataset": "xor",
+            "epochsRun": ">=20"
+          }
+        }
+      ]
+    },
+    "completionRule": {
+      "type": "tasks",
+      "required": 2
+    }
+  }
+]
