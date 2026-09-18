@@ -1,0 +1,12 @@
+{
+  // Type-checking config: covers the tests as well as src, and emits nothing. `build` uses
+  // tsconfig.json, which is the one that produces dist/ for consumers.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}
