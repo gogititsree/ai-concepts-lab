@@ -19,6 +19,14 @@ Decisions already made are in 01–06. These are the ones deliberately left to y
 | 13 | **Where housekeeping runs** | In-process `setInterval` vs external schedule (Render cron / GitHub Actions). | In-process for local; GitHub Actions schedule hitting an authenticated maintenance endpoint in prod (free, visible). | M13 |
 | 14 | **Styling** | Tailwind (chosen) vs CSS modules. | Tailwind. | M3 |
 | 15 | **Module gating** | All modules open with progress shown (chosen) vs locking modules until the previous quiz passes. | Open. Gating adds friction for a solo learner and complicates tests. | M7 |
+| 16 | **Structured-output reliability and thinking output** (from M0: `format`=JSON schema succeeded only 3/5; `message.thinking` present on most responses and dominates latency) | (a) Send `think: false` on every request except where the lesson wants to show reasoning; on structured-output validation failure retry once with the Zod error appended, then surface `STRUCTURED_OUTPUT_INVALID`. (b) Accept flakiness and teach it. | **(a)**, and make the retry count a metric (`structured_output_retries_total`). Re-measure reliability with `think:false` in M9 before designing Module 4 tasks. | M9 |
+
+## Findings from M0 (2026-09-17)
+- Installed model is `gemma4:latest` (8B Q4_K_M), not `e4b`; all docs and env defaults use `gemma4:latest`.
+- Tool calling: 5/5 native `tool_calls`, `function.arguments` arrives as a parsed object (adapter must still handle string).
+- Structured output: 3/5 valid; see decision 16.
+- Latency 10–45 s warm, 19–37 s cold load; `message.thinking` is the main cost. `prompt_eval_cached_count` is present and should go to `providerMeta`.
+- Details: docs/spike-notes.md, fixtures in apps/api/test/fixtures/ollama/.
 
 ## Risks to keep an eye on
 - **Local inference speed** on a CPU-only machine may make Module 5/6 runs take a minute each. Mitigations are in the `slow-inference` runbook; the scripted fake keeps the exercises completable.

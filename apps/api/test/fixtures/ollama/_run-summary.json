@@ -1,0 +1,128 @@
+{
+  "chat-plain": {
+    "latencyMs": 21652.0993,
+    "status": 200
+  },
+  "tool-call": {
+    "latencyMs": 40850.3704,
+    "status": 200
+  },
+  "tool-result-final": {
+    "latencyMs": 23080.1474,
+    "status": 200
+  },
+  "structured-output": {
+    "latencyMs": 7140.180100000012,
+    "status": 200,
+    "validJson": false,
+    "matchesSchema": false
+  },
+  "embed": {
+    "latencyMs": 1209.4752000000008,
+    "status": 200
+  },
+  "tags": {
+    "latencyMs": 17.000600000013947,
+    "status": 200
+  },
+  "reliability": {
+    "runs": [
+      {
+        "run": 1,
+        "status": 200,
+        "latencyMs": 43816.282900000006,
+        "outcome": "proper_tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_5wqq8t3q",
+            "function": {
+              "index": 0,
+              "name": "calculator",
+              "arguments": {
+                "expression": "12345 * 6789"
+              }
+            }
+          }
+        ],
+        "content": ""
+      },
+      {
+        "run": 2,
+        "status": 200,
+        "latencyMs": 12598.380700000009,
+        "outcome": "proper_tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_3a4uknr8",
+            "function": {
+              "index": 0,
+              "name": "calculator",
+              "arguments": {
+                "expression": "12345 * 6789"
+              }
+            }
+          }
+        ],
+        "content": ""
+      },
+      {
+        "run": 3,
+        "status": 200,
+        "latencyMs": 13515.881499999989,
+        "outcome": "proper_tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_awc21tws",
+            "function": {
+              "index": 0,
+              "name": "calculator",
+              "arguments": {
+                "expression": "12345 * 6789"
+              }
+            }
+          }
+        ],
+        "content": ""
+      },
+      {
+        "run": 4,
+        "status": 200,
+        "latencyMs": 34687.26979999998,
+        "outcome": "proper_tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_kmfx3nja",
+            "function": {
+              "index": 0,
+              "name": "calculator",
+              "arguments": {
+                "expression": "12345 * 6789"
+              }
+            }
+          }
+        ],
+        "content": ""
+      },
+      {
+        "run": 5,
+        "status": 200,
+        "latencyMs": 14066.892700000026,
+        "outcome": "proper_tool_calls",
+        "toolCalls": [
+          {
+            "id": "call_3m25icps",
+            "function": {
+              "index": 0,
+              "name": "calculator",
+              "arguments": {
+                "expression": "12345 * 6789"
+              }
+            }
+          }
+        ],
+        "content": ""
+      }
+    ],
+    "properCount": 5
+  }
+}

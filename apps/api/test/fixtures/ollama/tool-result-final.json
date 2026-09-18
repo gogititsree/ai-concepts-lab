@@ -1,0 +1,18 @@
+{
+  "model": "gemma4:latest",
+  "created_at": "2026-09-18T01:04:30.8194538Z",
+  "message": {
+    "role": "assistant",
+    "content": "12345 multiplied by 6789 is 83,810,205.",
+    "thinking": "The user asked to multiply 12345 by 6789 using the calculator tool. I used the `calculator` tool and received the result in the response: `{\"result\": 83810205}`. I should now present this final answer to the user."
+  },
+  "done": true,
+  "done_reason": "stop",
+  "total_duration": 23075399700,
+  "load_duration": 17563400,
+  "prompt_eval_count": 366,
+  "prompt_eval_cached_count": 106,
+  "prompt_eval_duration": 8921874000,
+  "eval_count": 90,
+  "eval_duration": 13897414000
+}

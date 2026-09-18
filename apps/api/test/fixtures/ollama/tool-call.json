@@ -1,0 +1,30 @@
+{
+  "model": "gemma4:latest",
+  "created_at": "2026-09-18T01:04:07.734276Z",
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "thinking": "1. **Analyze the Request:** The user wants to calculate \"12345 multiplied by 6789\" and explicitly instructs the use of the `calculator` tool.\n\n2. **Identify the Tool:** The available tool is `calculator`.\n\n3. **Determine Required Input:** The `calculator` tool requires an `expression` (a string containing the arithmetic operation).\n\n4. **Formulate the Expression:** The calculation is $12345 \\times 6789$. In string format, this is \"12345 * 6789\".\n\n5. **Construct the Tool Call:**\n   ```json\n   {\n     \"tool_name\": \"calculator\",\n     \"arguments\": {\n       \"expression\": \"12345 * 6789\"\n     }\n   }\n   ```\n\n6. **Output the Tool Call:** Present the tool call in the required format.",
+    "tool_calls": [
+      {
+        "id": "call_s6jkagzm",
+        "function": {
+          "index": 0,
+          "name": "calculator",
+          "arguments": {
+            "expression": "12345 * 6789"
+          }
+        }
+      }
+    ]
+  },
+  "done": true,
+  "done_reason": "stop",
+  "total_duration": 40830807800,
+  "load_duration": 37046400,
+  "prompt_eval_count": 111,
+  "prompt_eval_cached_count": 0,
+  "prompt_eval_duration": 4474680000,
+  "eval_count": 228,
+  "eval_duration": 36144908000
+}
