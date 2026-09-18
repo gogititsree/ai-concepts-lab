@@ -5,4 +5,5 @@ packages:
 # pnpm requires dependency build scripts to be opted into explicitly. esbuild's install
 # script fetches its platform binary, which Vite and Vitest need.
 allowBuilds:
+  argon2: set this to true or false
   esbuild: true
