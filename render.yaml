@@ -1,0 +1,25 @@
+# Render blueprint for the single-container deployment. The service itself has to be
+# created in the Render dashboard (or via "New > Blueprint" pointed at this file); this
+# file is the reviewable record of its configuration.
+services:
+  - type: web
+    name: ai-concepts-lab
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health
+    # Deploys are driven by .github/workflows/deploy.yml (deploy hook) after CI passes,
+    # not by Render watching the branch.
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      # Set per deploy so GET /api/v1/health reports which commit is live; deploy.yml
+      # polls that value. Not synced from this file, hence sync: false.
+      - key: GIT_SHA
+        sync: false

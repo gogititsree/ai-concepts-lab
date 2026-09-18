@@ -1,0 +1,76 @@
+name: Deploy
+
+on:
+  # Only deploy commits that already passed CI on main.
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Render deploy and verify
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment: production
+    steps:
+      - name: Resolve the commit being deployed
+        id: sha
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger the Render deploy hook
+        env:
+          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK_URL" ]; then
+            echo "::error::RENDER_DEPLOY_HOOK_URL secret is not set"
+            exit 1
+          fi
+          curl --fail --silent --show-error --request POST "$HOOK_URL" > /dev/null
+          echo "Deploy hook accepted."
+
+      - name: Wait for the new version to serve traffic
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          EXPECTED_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "::error::APP_URL repository variable is not set"
+            exit 1
+          fi
+          deadline=$(( $(date +%s) + 300 ))   # 5 minutes; a free instance also cold-starts
+          until [ "$(date +%s)" -ge "$deadline" ]; do
+            body=$(curl --fail --silent --max-time 15 "$APP_URL/api/v1/health" || true)
+            version=$(printf '%s' "$body" | jq -r '.version // empty' 2>/dev/null || true)
+            status=$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)
+            echo "health: status=${status:-<none>} version=${version:-<none>} (want $EXPECTED_SHA)"
+            if [ "$version" = "$EXPECTED_SHA" ] && [ "$status" = "ok" ]; then
+              echo "Deployed version matches the commit."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Timed out waiting for $APP_URL to report version $EXPECTED_SHA"
+          exit 1
+
+      - name: Smoke check
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          EXPECTED_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          body=$(curl --fail --silent --show-error --max-time 15 "$APP_URL/api/v1/health")
+          echo "$body"
+          echo "$body" | jq -e --arg sha "$EXPECTED_SHA" '.status == "ok" and .version == $sha' > /dev/null
+          # The SPA must be served from the same origin as the API.
+          curl --fail --silent --show-error --max-time 15 "$APP_URL/" | grep -q '<div id="root">'
+          echo "Smoke check passed."

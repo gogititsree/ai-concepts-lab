@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+pnpm-lock.yaml
+
+# Hand-authored design docs and fixtures: Prettier's markdown/JSON rewriting would create
+# huge diffs with no benefit, and these are owned by other workstreams.
+docs/
+CLAUDE.md
+spike/
+apps/api/test/fixtures/
