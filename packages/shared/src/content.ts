@@ -365,6 +365,153 @@ export type PromptConfig = z.infer<typeof PromptConfigSchema>;
 export type PromptCheck = z.infer<typeof PromptCheckSchema>;
 export type PromptTask = PromptConfig['tasks'][number];
 
+// ------------------------------------------------------ Module 5 config (M10) ----
+
+/**
+ * Module 5's `agent` exercise (M10).
+ *
+ * The four checks are the four in docs/04-curriculum.md, written as a discriminated
+ * union because they ask genuinely different questions of a finished run: one about a
+ * number in the final answer, one about the *order* of two steps, one about which tool
+ * was called, and one about whether the learner watched something fail. A bag of
+ * optional fields would let a content typo produce a task that can never pass.
+ *
+ * Every check is evaluated against the **completed run's steps** (`agent_run_steps`),
+ * never against anything the browser computed for itself. The trace is the evidence, and
+ * it is the same trace `/runs/:id` shows — so a learner can always see exactly why a task
+ * did or did not pass.
+ */
+const AgentCheckSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      /** A `tool_call` to `toolCalled`, and a final answer within `withinPercent` of `expected`. */
+      type: z.literal('numeric-answer'),
+      toolCalled: z.string().min(1),
+      expected: z.number(),
+      withinPercent: z.number().positive().max(100),
+    })
+    .strict(),
+  z
+    .object({
+      /** A `tool_call` step naming `toolName` must appear *before* the `final` step. */
+      type: z.literal('tool-before-final'),
+      toolName: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      /** A successfully parsed `tool_call` to a tool that is not in the server catalog. */
+      type: z.literal('mock-tool-called'),
+    })
+    .strict(),
+  z
+    .object({
+      /** A `tool_result` step with `is_error`, plus a written reflection. */
+      type: z.literal('error-observed'),
+      requiresReflection: z.boolean().default(true),
+    })
+    .strict(),
+]);
+export type AgentCheck = z.infer<typeof AgentCheckSchema>;
+
+/** A mock tool as *authored* (the "add mock tool" form is pre-filled from it). */
+const MockToolTemplateSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, 'must be a valid function name'),
+    description: z.string().min(1).max(1024),
+    parameters: z.record(z.unknown()),
+    response: z.unknown(),
+  })
+  .strict();
+export type MockToolTemplate = z.infer<typeof MockToolTemplateSchema>;
+
+export const AgentConfigSchema = z
+  .object({
+    /** The catalog names the tool picker offers. Must be a subset of the server's. */
+    toolCatalog: z.array(z.string().min(1)).min(1),
+    allowMockTools: z.boolean().default(true),
+    /** 15 is the server's hard cap (`AGENT_MAX_ITERATIONS_CAP`); content may not exceed it. */
+    defaultMaxIterations: z.number().int().min(1).max(15).default(8),
+    defaults: z
+      .object({
+        systemPrompt: z.string().default(''),
+        userPrompt: z.string().default(''),
+        /** Pre-ticked in the picker. */
+        tools: z.array(z.string().min(1)).default([]),
+      })
+      .strict(),
+    mockToolTemplate: MockToolTemplateSchema.optional(),
+    reflectionMd: z.string().min(1).optional(),
+    tasks: z
+      .array(
+        z
+          .object({
+            ...TaskBaseShape,
+            /** Loaded into the editors by the "load this task" button. */
+            systemPrompt: z.string().optional(),
+            userPrompt: z.string().optional(),
+            tools: z.array(z.string().min(1)).optional(),
+            maxIterations: z.number().int().min(1).max(15).optional(),
+            /** True for the task that needs the mock-tool form filled in. */
+            addsMockTool: z.boolean().default(false),
+            check: AgentCheckSchema,
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    const catalog = new Set(config.toolCatalog);
+    config.defaults.tools.forEach((name, index) => {
+      if (!catalog.has(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['defaults', 'tools', index],
+          message: `"${name}" is not in toolCatalog`,
+        });
+      }
+    });
+    config.tasks.forEach((task, index) => {
+      (task.tools ?? []).forEach((name, toolIndex) => {
+        if (!catalog.has(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['tasks', index, 'tools', toolIndex],
+            message: `"${name}" is not in toolCatalog`,
+          });
+        }
+      });
+      // A check that names a tool the picker cannot offer is a task nobody can pass.
+      const named =
+        task.check.type === 'numeric-answer'
+          ? task.check.toolCalled
+          : task.check.type === 'tool-before-final'
+            ? task.check.toolName
+            : null;
+      if (named !== null && !catalog.has(named)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['tasks', index, 'check'],
+          message: `the check requires "${named}", which is not in toolCatalog`,
+        });
+      }
+      if (task.check.type === 'mock-tool-called' && !config.allowMockTools) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['tasks', index, 'check'],
+          message: 'a mock-tool-called check needs allowMockTools: true',
+        });
+      }
+    });
+  });
+export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+export type AgentTask = AgentConfig['tasks'][number];
+
 // ------------------------------------------------------- Module 3 config (M8) ----
 
 /**
@@ -705,7 +852,9 @@ export const ExerciseConfigSchemas = {
   // than a second exercise row, so this kind shares its config schema. The enum keeps
   // the kind because docs/02-schema.md defines it and a later module may want it alone.
   structured_output: PromptConfigSchema,
-  agent: LooseConfigSchema,
+  // M10: Module 5. Tightened from the loose record so a task whose check names a tool
+  // the picker never offers fails at seed time rather than as a task nobody can pass.
+  agent: AgentConfigSchema,
   harness: LooseConfigSchema,
 } satisfies Record<ExerciseKind, z.ZodTypeAny>;
 

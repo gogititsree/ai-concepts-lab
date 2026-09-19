@@ -263,3 +263,90 @@ agent_run_steps: (0 model_call, 1 final) for each run, latency on the model_call
 **The cold-load penalty is the headline.** The first call after idle costs ~20 s more than a
 warm one. `keep_alive: '10m'` covers a working session, but the first exercise run of the day
 will feel broken without the elapsed-time counter the playground now shows.
+
+## M10 measurements (2026-09-19, real provider, agent loop end to end)
+
+Measured through `POST /api/v1/model/runs` with `MODEL_PROVIDER=ollama`, `gemma4:latest`,
+temperature 0, real Postgres, server-side loop. Same machine as the M9 numbers.
+
+### Does the 8B model reliably choose to call a tool? Yes — 13/13.
+
+| task | system prompt | tool call emitted | correct answer |
+|---|---|---|---|
+| `compound-interest` | coaxing ("use the calculator for EVERY calculation") | 5 / 5 | 5 / 5 |
+| `compound-interest` | bare ("You are a helpful assistant.") | 3 / 3 | 3 / 3 |
+| `must-check-time` | bare | 2 / 2 | 2 / 2 |
+| `must-check-time` | coaxing ("you do NOT know today's date") | 2 / 2 | 2 / 2 |
+| `compound-interest` | the exercise's shipped default prompt | 1 / 1 | 1 / 1 |
+
+Every run produced a native `message.tool_calls` array with correctly-shaped arguments —
+no parse failures, no tool-call-as-prose, no hallucinated names. The arguments were
+byte-identical across runs of the same prompt (`{"expression": "2500 * (1 + 0.07)^8"}`),
+which is consistent with the 5/5 result from the M0 spike.
+
+**The honest conclusion: coaxing was not needed for these tasks.** With one or two
+unambiguous tools attached and a question that obviously needs one, this model calls it.
+The exercise still ships the coaxing prompt as its default, for two reasons that are
+about teaching rather than about necessity: it is the prompt a learner should *learn* to
+write, and the `must-check-time` task is only meaningful if the instruction is there to
+be read. A learner who deletes it will mostly still pass, and noticing that is a fine
+outcome.
+
+### The canonical trace (used verbatim in lesson 3)
+
+```
+system: You are a careful assistant with tools. Use the calculator tool for EVERY
+        calculation ... give a plain final answer.
+user:   A deposit of 2500 earns 7% interest compounded annually. What is the balance
+        after 8 years? Give the number to two decimal places.
+tools:  [calculator]
+```
+
+| # | kind | iter | tool | latency | tokens (p/c) |
+|---|---|---|---|---|---|
+| 0 | model_call | 1 | — | 23 548 ms | 227 / 27 |
+| 1 | tool_call | 1 | calculator | — | — |
+| 2 | tool_result | 1 | calculator | **2 ms** | — |
+| 3 | model_call | 2 | — | 8 100 ms | 303 / 17 |
+| 4 | final | 2 | — | — | — |
+
+`status=completed`, `iteration_count=2`, `tool_call_count=1`,
+`tool_parse_failure_count=0`, 530 prompt tokens, 44 completion tokens,
+`model_latency_ms_total=31 648`, wall clock 31 758 ms. Final answer:
+`The balance after 8 years is $4295.47.` (true value 4295.4654 — inside 1 %).
+
+### Latency
+
+| run | wall clock |
+|---|---|
+| first of the session (cold load) | 68.0 s |
+| warm, 1 tool | 18.7 – 20.9 s |
+| warm, 1 tool, second session | 31.8 s |
+| warm, bare prompt, 1 tool | 12.3 – 29.8 s |
+
+Two model calls per run, so roughly 9–25 s per call warm. Tool execution is **2–9 ms**
+in every run: **inference is over 99.9 % of an agent run's wall clock.** The 5-minute
+wall-clock guardrail is generous for a 2-iteration run and about right for eight.
+
+### Attaching every tool costs real money
+
+The same question, with all six catalog tools ticked instead of one:
+
+| tools attached | first-call prompt tokens | first-call latency | wall clock |
+|---|---|---|---|
+| 1 (`calculator`) | 227 | 23.5 s | 31.8 s |
+| 6 (whole catalog) | 1052 | 71.2 s | 80.1 s |
+
+Tool descriptions are prompt text and they are re-sent on every iteration. A 4.6× prompt
+and a 3× latency for five tools the model never called. This is the number behind the
+"tick only what you need" note in the exercise, and it is `agent_run_iterations` ×
+prompt-token growth in the M14 metrics.
+
+### The deliberate failure path, end to end
+
+`flaky_service` with a real model: `model_call → tool_call → tool_result(is_error) →
+model_call → final`, `status=completed`, 27.6 s. The model read the error object,
+reported it in plain language and stopped. Exactly the behaviour the loop's
+"errors are observations" contract is supposed to produce, and the run is `completed`
+rather than `failed` because the *agent* did the right thing — a distinction the SLIs in
+M14 need to preserve.

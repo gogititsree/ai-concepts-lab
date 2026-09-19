@@ -49,6 +49,16 @@ export const FAKE_SCENARIOS = [
   'tool-call-unknown-tool',
   /** Always calls a tool, so the loop hits `maxIterations`. */
   'tool-call-never-stops',
+  /** Calls `calculator` with arguments that parse as JSON but fail its Zod schema. */
+  'tool-call-invalid-args',
+  /** Calls `flaky_service`, which always throws, then answers once the error comes back. */
+  'tool-call-throws',
+  /** Two tool calls in one assistant turn, then a final answer. */
+  'tool-call-parallel',
+  /** Calls `get_current_time`, then answers. Module 5's `must-check-time` task. */
+  'tool-call-time',
+  /** Calls a learner-defined mock tool (`get_order_status`), then answers. */
+  'tool-call-mock',
   /** Sleeps before answering. `slow:2500` sets the delay in ms (default 1500). */
   'slow',
   /** Throws `MODEL_TIMEOUT`. */
@@ -271,6 +281,66 @@ export class FakeProvider implements ModelProvider {
             }),
           ],
         };
+
+      case 'tool-call-invalid-args':
+        // Well-formed JSON, wrong *shape*: `parseOk` is true and the rejection comes
+        // from the tool's own schema. That is a different trace from
+        // `tool-call-malformed-args` and a different lesson.
+        return hasToolResult(req)
+          ? { role: 'assistant', content: 'Sorry - I called the calculator incorrectly.' }
+          : {
+              role: 'assistant',
+              content: '',
+              toolCalls: [toolCall({ name: 'calculator', args: { expr: 12345 } })],
+            };
+
+      case 'tool-call-throws':
+        return hasToolResult(req)
+          ? {
+              role: 'assistant',
+              content: 'The service is down, so I cannot answer that right now.',
+            }
+          : {
+              role: 'assistant',
+              content: '',
+              toolCalls: [toolCall({ name: 'flaky_service', args: { query: 'status' } })],
+            };
+
+      case 'tool-call-parallel':
+        return hasToolResult(req)
+          ? { role: 'assistant', content: 'Both tools answered; here is the combined result.' }
+          : {
+              role: 'assistant',
+              content: '',
+              toolCalls: [
+                toolCall({ id: 'call_fake_a', name: 'calculator', args: { expression: '6 * 7' } }),
+                toolCall({
+                  id: 'call_fake_b',
+                  name: 'unit_convert',
+                  args: { value: 1, from: 'km', to: 'm' },
+                }),
+              ],
+            };
+
+      case 'tool-call-time':
+        return hasToolResult(req)
+          ? { role: 'assistant', content: 'According to the clock tool, it is a Tuesday.' }
+          : {
+              role: 'assistant',
+              content: '',
+              toolCalls: [
+                toolCall({ name: 'get_current_time', args: { timezone: 'Europe/London' } }),
+              ],
+            };
+
+      case 'tool-call-mock':
+        return hasToolResult(req)
+          ? { role: 'assistant', content: 'Order A-1001 has shipped.' }
+          : {
+              role: 'assistant',
+              content: '',
+              toolCalls: [toolCall({ name: 'get_order_status', args: { order_id: 'A-1001' } })],
+            };
 
       case 'tool-call-unknown-tool':
         return {

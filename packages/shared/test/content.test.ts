@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AgentConfigSchema,
   ExercisesFileSchema,
   PerceptronConfigSchema,
   LessonFrontmatterSchema,
@@ -297,18 +298,109 @@ describe('per-kind exercise config schemas', () => {
   });
 
   it('leaves the kinds later milestones own loose', () => {
-    // `tokenizer` was this example until M8 tightened it; `agent` (M10) is the next
-    // kind still on the loose record schema.
-    const agent = [
+    // `tokenizer` was this example until M8 tightened it and `agent` until M10 did;
+    // `harness` (M11) is the last kind still on the loose record schema.
+    const harness = [
       {
-        slug: 'tool-loop',
-        title: 'Tool loop',
-        kind: 'agent',
+        slug: 'write-the-loop',
+        title: 'Write the loop',
+        kind: 'harness',
         orderIndex: 1,
         config: { anything: ['goes', 'for', 'now'] },
         completionRule: { type: 'manual' },
       },
     ];
-    expect(ExercisesFileSchema.safeParse(agent).success).toBe(true);
+    expect(ExercisesFileSchema.safeParse(harness).success).toBe(true);
+  });
+});
+
+/**
+ * Module 5's `agent` config (M10).
+ *
+ * The cross-field refinements are the reason this schema is not the loose record any
+ * more: a task whose check names a tool the picker never offers is a task nobody can
+ * pass, and that should be a seed-time error with a path rather than a mystery in the
+ * UI.
+ */
+describe('agent exercise config', () => {
+  const validAgent = {
+    toolCatalog: ['calculator', 'get_current_time'],
+    defaultMaxIterations: 6,
+    defaults: { systemPrompt: 'be careful', userPrompt: 'compute 2+2', tools: ['calculator'] },
+    tasks: [
+      {
+        id: 'compound-interest',
+        label: 'Use the calculator',
+        check: {
+          type: 'numeric-answer',
+          toolCalled: 'calculator',
+          expected: 4295.4654,
+          withinPercent: 1,
+        },
+      },
+    ],
+  };
+
+  const agent = (config: unknown) => [
+    {
+      slug: 'agent-loop',
+      title: 'Agent loop',
+      kind: 'agent',
+      orderIndex: 1,
+      config,
+      completionRule: { type: 'tasks', required: 2 },
+    },
+  ];
+
+  it('accepts the shape the shipped content uses', () => {
+    expect(ExercisesFileSchema.safeParse(agent(validAgent)).success).toBe(true);
+  });
+
+  it('applies defaults for allowMockTools and defaultMaxIterations', () => {
+    const { defaultMaxIterations: _unused, ...withoutMax } = validAgent;
+    const parsed = AgentConfigSchema.parse(withoutMax);
+    expect(parsed.allowMockTools).toBe(true);
+    expect(parsed.defaultMaxIterations).toBe(8);
+  });
+
+  it('rejects a default tool that is not in the catalog', () => {
+    const bad = { ...validAgent, defaults: { ...validAgent.defaults, tools: ['rm_rf'] } };
+    expect(ExercisesFileSchema.safeParse(agent(bad)).success).toBe(false);
+  });
+
+  it('rejects a check that names a tool the picker never offers', () => {
+    const bad = {
+      ...validAgent,
+      tasks: [
+        { id: 'x', label: 'x', check: { type: 'tool-before-final', toolName: 'fake_weather' } },
+      ],
+    };
+    const result = ExercisesFileSchema.safeParse(agent(bad));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message).join(' ')).toMatch(
+        /not in toolCatalog/,
+      );
+    }
+  });
+
+  it('rejects a mock-tool task when mock tools are switched off', () => {
+    const bad = {
+      ...validAgent,
+      allowMockTools: false,
+      tasks: [{ id: 'x', label: 'x', check: { type: 'mock-tool-called' } }],
+    };
+    expect(ExercisesFileSchema.safeParse(agent(bad)).success).toBe(false);
+  });
+
+  it('rejects an unknown check type and a maxIterations above the server cap', () => {
+    expect(
+      ExercisesFileSchema.safeParse(
+        agent({ ...validAgent, tasks: [{ id: 'x', label: 'x', check: { type: 'vibes' } }] }),
+      ).success,
+    ).toBe(false);
+    expect(
+      ExercisesFileSchema.safeParse(agent({ ...validAgent, defaultMaxIterations: 16 })).success,
+    ).toBe(false);
   });
 });
