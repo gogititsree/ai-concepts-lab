@@ -39,6 +39,19 @@ export type ChatRole = z.infer<typeof ChatRoleSchema>;
 export const JsonSchemaObjectSchema = z.record(z.unknown());
 export type JsonSchemaObject = z.infer<typeof JsonSchemaObjectSchema>;
 
+// ------------------------------------------------------------------ guardrails ----
+
+// Declared here rather than beside the run contracts they were written for, because
+// `ModelChatRequestSchema` below needs the cap too and a `const` cannot be used above
+// its declaration.
+
+/** docs/01-architecture.md → "Guardrails": default 8, hard cap 15. */
+export const AGENT_MAX_ITERATIONS_DEFAULT = 8;
+export const AGENT_MAX_ITERATIONS_CAP = 15;
+/** Total wall clock for one run, and the ceiling on one tool execution. */
+export const AGENT_WALL_CLOCK_MS = 5 * 60 * 1000;
+export const TOOL_TIMEOUT_MS = 10_000;
+
 // ------------------------------------------------------------------- messages ----
 
 /**
@@ -178,6 +191,15 @@ const IsoTimestampSchema = z.string().datetime();
 export const ModelChatRequestSchema = ChatRequestSchema.extend({
   exerciseId: UuidSchema.optional(),
   runId: UuidSchema.optional(),
+  /**
+   * Which iteration of the caller's loop this call belongs to. Only meaningful with
+   * `runId`, and added in M11 for one concrete reason: the trace viewer groups steps by
+   * iteration, and a browser-driven harness that could not say which pass it was on had
+   * every one of its `model_call` rows stamped `iteration 1` while its tool rows and its
+   * `final` were numbered correctly. A trace whose grouping disagrees with itself is
+   * worse than no grouping. Defaults to 1, which is exactly what a single-turn call is.
+   */
+  iteration: z.number().int().min(1).max(AGENT_MAX_ITERATIONS_CAP).optional(),
 });
 export type ModelChatRequest = z.infer<typeof ModelChatRequestSchema>;
 
@@ -367,12 +389,6 @@ export function utf8ByteLength(value: string): number {
   return bytes;
 }
 
-/** docs/01-architecture.md → "Guardrails": default 8, hard cap 15. */
-export const AGENT_MAX_ITERATIONS_DEFAULT = 8;
-export const AGENT_MAX_ITERATIONS_CAP = 15;
-/** Total wall clock for one run, and the ceiling on one tool execution. */
-export const AGENT_WALL_CLOCK_MS = 5 * 60 * 1000;
-export const TOOL_TIMEOUT_MS = 10_000;
 /** Mock tools are carried in the run row and sent to the model; both want a ceiling. */
 export const AGENT_MAX_MOCK_TOOLS = 5;
 export const MOCK_TOOL_RESPONSE_MAX_BYTES = 4096;

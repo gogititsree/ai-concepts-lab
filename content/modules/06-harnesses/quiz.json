@@ -26,12 +26,120 @@
       "correct": {
         "optionIds": ["c"]
       },
-      "explanationMd": "Nothing in the model guarantees termination. The cap is the only thing that turns an unbounded loop into a bounded, billable, debuggable one.",
+      "explanationMd": "Nothing in the model guarantees termination. The cap is the only thing that turns an unbounded loop into a bounded, billable, debuggable one — and hitting it is a *status*, not a crash.",
       "points": 1
     },
     {
       "kind": "single_choice",
-      "promptMd": "Which SLI would reveal a broken tool schema first?",
+      "promptMd": "A reply comes back with `content: \"Let me work that out with the calculator.\"` **and** one `calculator` tool call. What should the loop do?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Return the content as the final answer — the model has spoken"
+        },
+        {
+          "id": "b",
+          "textMd": "Execute the tool call, append the result as a `tool` message, and call the model again"
+        },
+        {
+          "id": "c",
+          "textMd": "Ignore the content, execute the tool, and return the tool's result as the final answer"
+        },
+        {
+          "id": "d",
+          "textMd": "Treat it as malformed: a reply may contain text or tool calls, not both"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "The stopping condition is the **absence of tool calls**, not the presence of text. A model can narrate and act in the same turn, and (a) is the single commonest bug in a hand-written loop — it answers with the narration and never computes anything.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Where in the loop does context compaction belong?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "Once, before the loop starts, when the system prompt is assembled"
+        },
+        {
+          "id": "b",
+          "textMd": "At the top of each iteration, just before the model call, when the transcript may have grown past a threshold"
+        },
+        {
+          "id": "c",
+          "textMd": "Immediately after the final answer, so the stored trace is smaller"
+        },
+        {
+          "id": "d",
+          "textMd": "Inside each tool, so no tool ever returns more than a few hundred tokens"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "The transcript grows by an assistant turn plus one `tool` message per call every time round, and tool results are the large ones. The only place that growth can be noticed and acted on is at the top of the next iteration, before the call that would overflow. (d) is a useful separate habit, not compaction; (c) confuses the trace with the context.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "A coding harness stops and asks before running a shell command. What is the permission prompt actually guarding against?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "The model being malicious"
+        },
+        {
+          "id": "b",
+          "textMd": "The model being confident and wrong, on an action whose cost is not symmetric with the cost of one confirmation"
+        },
+        {
+          "id": "c",
+          "textMd": "The model emitting arguments that are not valid JSON"
+        },
+        {
+          "id": "d",
+          "textMd": "The tool taking longer than its timeout"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "Permission prompts are an asymmetry argument, not a trust argument. A wrong `rm -rf` costs far more than a confirmation dialog costs, so the expensive actions are the ones that ask. (c) is what schema validation is for and (d) is what the per-tool timeout is for; the three guardrails are not interchangeable.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "A harness spawns a sub-agent to answer one narrow question. Why should the sub-agent's intermediate messages **not** be merged into the parent's context?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "They would break the parent's JSON schema validation"
+        },
+        {
+          "id": "b",
+          "textMd": "The parent's model provider would reject a transcript with two assistant roles"
+        },
+        {
+          "id": "c",
+          "textMd": "They would consume the parent's context window with dead ends the parent has no reason to reason about; only the sub-agent's *answer* is useful to it"
+        },
+        {
+          "id": "d",
+          "textMd": "Sub-agent messages are not persisted, so they cannot be merged"
+        }
+      ],
+      "correct": {
+        "optionIds": ["c"]
+      },
+      "explanationMd": "A sub-agent is a context-window budget with a job. Its twenty intermediate turns are exactly what the parent was trying to avoid holding — the answer comes back as one `tool` message and the search that produced it stays where it happened.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "You edit a tool's JSON Schema and quietly break it. Which SLI moves first?",
       "options": [
         {
           "id": "a",
@@ -53,7 +161,61 @@
       "correct": {
         "optionIds": ["b"]
       },
-      "explanationMd": "A schema the model cannot satisfy shows up immediately as arguments that fail validation. Latency and volume barely move; token counts drift only after the retries pile up.",
+      "explanationMd": "A schema the model cannot satisfy shows up immediately as arguments that fail validation, before any user reports anything. Latency and volume barely move; token counts drift only later, once the retries pile up.",
+      "points": 1
+    },
+    {
+      "kind": "multi_choice",
+      "promptMd": "The Module 6 exercise runs your `runAgent` in a Web Worker in your own browser. Which of these does that actually protect? Select all that apply.",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "The page: an infinite loop in your code pins the worker's thread, not the UI thread, so cancel still works"
+        },
+        {
+          "id": "b",
+          "textMd": "Server state: the worker holds no session and cannot fetch, so every model call has to go back through the page"
+        },
+        {
+          "id": "c",
+          "textMd": "The browser: code in the worker cannot reach the page's origin, cookies or storage under any circumstances"
+        },
+        {
+          "id": "d",
+          "textMd": "Accidental network calls: `fetch`, `postMessage` and `importScripts` are shadowed, so reaching for one is a loud `TypeError`"
+        }
+      ],
+      "correct": {
+        "optionIds": ["a", "b", "d"]
+      },
+      "explanationMd": "(c) is the one that is false, and saying so out loud is the point. A worker is **same-origin** with its page: `Function('return this')()` hands back the real global. The sandbox is a boundary against mistakes, not against an attacker — which is fine when the code is your own, and stops being fine the moment a system runs code someone else wrote.",
+      "points": 2
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "A run ends because the model called a deliberately broken tool, read the error it returned and explained the problem to the user. What status should the run carry?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "`failed` — a tool failed"
+        },
+        {
+          "id": "b",
+          "textMd": "`completed` — the agent behaved correctly and produced an answer"
+        },
+        {
+          "id": "c",
+          "textMd": "`max_iterations` — it did not answer the original question"
+        },
+        {
+          "id": "d",
+          "textMd": "`cancelled` — the work was abandoned"
+        }
+      ],
+      "correct": {
+        "optionIds": ["b"]
+      },
+      "explanationMd": "\"A tool failed\" and \"the run failed\" are different events, and a metric that blends them cannot tell you which one is happening. The tool failure is visible as a `tool_result` step with `is_error`; the run is `completed` because the loop's error-as-observation contract did exactly what it is for.",
       "points": 1
     }
   ]

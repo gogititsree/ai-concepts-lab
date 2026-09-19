@@ -71,13 +71,38 @@ interface CreateRunBody {
   options?: Record<string, unknown>;
 }
 
-const createRun = (body: CreateRunBody, auth: string | null = cookie, target = app) =>
+const postRun = (body: CreateRunBody, auth: string | null = cookie, target = app) =>
   target.inject({
     method: 'POST',
     url: '/api/v1/model/runs',
     headers: auth ? { ...WRITE_HEADERS, cookie: auth } : WRITE_HEADERS,
     payload: { userPrompt: 'Do the thing.', kind: 'agent', ...body },
   });
+
+/**
+ * Start a run, retrying briefly on 409 RUN_IN_PROGRESS.
+ *
+ * The concurrency slot is released in the background loop's `finally`, which runs a tick
+ * *after* the terminal status is written. So a caller that polls until the run is no
+ * longer `running` and then immediately starts the next one can legitimately arrive
+ * while the previous slot is still held. That window is real for the UI too -- clicking
+ * "run again" the instant a run finishes can 409 -- so the honest fix is for the caller
+ * to retry rather than for the test to pretend the race does not exist.
+ *
+ * Without this the failure was intermittent *and* misleading: `createRun` did not check
+ * its status code, so a 409 surfaced as an undefined `runId` and a 404 three lines later.
+ */
+const createRun = async (body: CreateRunBody, auth: string | null = cookie, target = app) => {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const res = await postRun(body, auth, target);
+    const isSlotConflict =
+      res.statusCode === 409 &&
+      (res.json() as { error?: { code?: string } })?.error?.code === 'RUN_IN_PROGRESS';
+    if (!isSlotConflict || Date.now() > deadline) return res;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
 
 const getRun = (id: string, auth: string = cookie) =>
   app.inject({ method: 'GET', url: `/api/v1/model/runs/${id}`, headers: { cookie: auth } });
@@ -317,7 +342,7 @@ describe('the one-run-per-user semaphore', () => {
     const first = await createRun({ options: { scenario: 'slow:600' } });
     expect(first.statusCode).toBe(202);
 
-    const second = await createRun({ options: { scenario: 'plain-answer' } });
+    const second = await postRun({ options: { scenario: 'plain-answer' } });
     expect(second.statusCode).toBe(409);
     expect(second.json().error.code).toBe('RUN_IN_PROGRESS');
     expect(second.json().error.details.runId).toBe(first.json().runId);
@@ -586,6 +611,165 @@ describe('POST /model/runs/:id/steps', () => {
     expect((await report(runId, fat)).statusCode).toBe(400);
 
     expect((await report(runId, [])).statusCode).toBe(400);
+  });
+});
+
+// ------------------------------------------------- the M11 harness round trip ----
+
+/**
+ * The whole path Module 6's Web Worker drives, from this side of the wire.
+ *
+ * Neither half is new — `POST /model/chat` with a `runId` and `POST /runs/:id/steps` are
+ * both already tested above — but the *interleaving* is, and it is the thing that would
+ * break silently. The browser loop and the server each write into the same trace, from
+ * two different requests, and the contract is that they take turns: the server owns the
+ * `model_call` rows (it measured the latency and the tokens), the client owns the tool
+ * rows and the `final`. A change that made either side write the other's rows would
+ * double the numbers in `agent_runs` and nothing here would fail unless this test
+ * existed.
+ */
+describe('a harness run driven from the browser', () => {
+  const CALCULATOR = {
+    name: 'calculator',
+    description: 'Evaluate an arithmetic expression exactly.',
+    parameters: { type: 'object', properties: { expression: { type: 'string' } } },
+  };
+
+  const chat = (runId: string, iteration: number, messages: unknown[]) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/v1/model/chat',
+      headers: { ...WRITE_HEADERS, cookie },
+      payload: {
+        messages,
+        tools: [CALCULATOR],
+        runId,
+        // The browser's loop counter. Without it every appended `model_call` row would
+        // be stamped iteration 1 while the tool rows around it were numbered correctly,
+        // and the trace viewer groups by iteration.
+        iteration,
+        options: { scenario: 'tool-call-once' },
+      },
+    });
+
+  const report = (runId: string, steps: unknown[]) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/v1/model/runs/${runId}/steps`,
+      headers: { ...WRITE_HEADERS, cookie },
+      payload: { steps },
+    });
+
+  it('interleaves server model_call rows with client tool rows and closes on final', async () => {
+    const created = await createRun({
+      kind: 'harness',
+      userPrompt: 'What is 12345 * 6789?',
+    });
+    expect(created.statusCode).toBe(202);
+    const runId = created.json().runId as string;
+
+    // Iteration 1: the worker asks the page to call the model; the server logs the call.
+    const first = await chat(runId, 1, [{ role: 'user', content: 'What is 12345 * 6789?' }]);
+    expect(first.statusCode).toBe(200);
+    const calls = first.json().message.toolCalls as { name: string; args: unknown }[];
+    expect(calls).toHaveLength(1);
+    // The response reuses the run rather than opening a second one.
+    expect(first.json().runId).toBe(runId);
+
+    // The learner's loop executes the tool in the browser and reports both rows.
+    const reported = await report(runId, [
+      {
+        kind: 'tool_call',
+        iteration: 1,
+        toolName: 'calculator',
+        toolArgs: calls[0]?.args,
+        parseOk: true,
+      },
+      {
+        kind: 'tool_result',
+        iteration: 1,
+        toolName: 'calculator',
+        toolResult: { expression: '12345 * 6789', result: 83810205 },
+        latencyMs: 1,
+      },
+    ]);
+    expect(reported.statusCode).toBe(201);
+    expect(reported.json().steps.map((step: { stepIndex: number }) => step.stepIndex)).toEqual([
+      1, 2,
+    ]);
+
+    // Iteration 2: the transcript now carries the tool message, so the fake finishes.
+    const second = await chat(runId, 2, [
+      { role: 'user', content: 'What is 12345 * 6789?' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: calls.map((call, index) => ({
+          id: `call_${index + 1}`,
+          name: call.name,
+          args: call.args,
+          parseOk: true,
+        })),
+      },
+      {
+        role: 'tool',
+        toolName: 'calculator',
+        content: '{"expression":"12345 * 6789","result":83810205}',
+      },
+    ]);
+    const finalText = second.json().message.content as string;
+    expect(second.json().message.toolCalls ?? []).toHaveLength(0);
+
+    const closed = await report(runId, [{ kind: 'final', iteration: 2, content: finalText }]);
+    expect(closed.statusCode).toBe(201);
+
+    const run = (await getRun(runId)).json();
+    expect(
+      (run.steps as { kind: string; iteration: number }[]).map(
+        (step) => `${step.kind}@${step.iteration}`,
+      ),
+    ).toEqual(['model_call@1', 'tool_call@1', 'tool_result@1', 'model_call@2', 'final@2']);
+    expect(run).toMatchObject({
+      kind: 'harness',
+      status: 'completed',
+      finalOutput: finalText,
+      // Two chat calls, each accumulating one iteration. The client reported no
+      // `model_call` rows, which is what keeps this 2 rather than 4.
+      iterationCount: 2,
+      // Exactly one, and the number that makes this assertion worth writing: the model
+      // requested one tool call (which `/model/chat` sees) and the browser reported
+      // executing one (which `/steps` sees). They are the same call, so only the side
+      // that writes the `tool_call` row counts it.
+      toolCallCount: 1,
+      toolParseFailureCount: 0,
+    });
+    expect(run.modelLatencyMsTotal).toBeGreaterThanOrEqual(0);
+    const toolRows = (run.steps as { kind: string }[]).filter((step) => step.kind === 'tool_call');
+    expect(toolRows).toHaveLength(run.toolCallCount);
+
+    // Reported rows are tagged, so a trace always says who wrote each line.
+    const clientRows = (run.steps as { kind: string; raw: unknown }[]).filter(
+      (step) => step.kind !== 'model_call',
+    );
+    expect(
+      clientRows.every((step) => (step.raw as { reportedBy?: string })?.reportedBy === 'client'),
+    ).toBe(true);
+  });
+
+  it('leaves the run open until a final step arrives', async () => {
+    const created = await createRun({ kind: 'harness' });
+    const runId = created.json().runId as string;
+    await report(runId, [{ kind: 'tool_call', iteration: 1, toolName: 'calculator' }]);
+    expect((await getRun(runId)).json().status).toBe('running');
+
+    // Which is why the page cancels a run whose loop crashed: otherwise it sits at
+    // `running` for ever and its SSE stream never terminates.
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/model/runs/${runId}/cancel`,
+      headers: { ...WRITE_HEADERS, cookie },
+    });
+    expect((await getRun(runId)).json().status).toBe('cancelled');
   });
 });
 
