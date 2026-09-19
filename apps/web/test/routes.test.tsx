@@ -1,14 +1,15 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+
+import { Providers } from './harness';
 import { describe, expect, it } from 'vitest';
 
 import { App } from '../src/App';
 
 function renderAt(path: string) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
+    <Providers path={path}>
       <App />
-    </MemoryRouter>,
+    </Providers>,
   );
 }
 

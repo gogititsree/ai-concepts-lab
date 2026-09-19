@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+
+import { Providers } from './harness';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { HomePage } from '../src/routes/HomePage';
@@ -18,9 +19,9 @@ describe('HomePage', () => {
     );
 
     render(
-      <MemoryRouter>
+      <Providers>
         <HomePage />
-      </MemoryRouter>,
+      </Providers>,
     );
 
     expect(await screen.findByTestId('health-status')).toHaveTextContent('ok');
