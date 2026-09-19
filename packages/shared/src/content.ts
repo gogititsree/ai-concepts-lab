@@ -281,6 +281,412 @@ export const MlpConfigSchema = z
 export type MlpConfig = z.infer<typeof MlpConfigSchema>;
 
 /**
+ * Module 4's `prompt` exercise (M9). The playground is a thin shell around
+ * `POST /api/v1/model/chat`; everything that makes it an *exercise* — the starting
+ * prompts, the sampling defaults, the four auto-checked tasks and the JSON Schema used as
+ * `format` — is authored here.
+ *
+ * Three of the four checks run client-side against the response text. The fourth
+ * (`structured`) cannot: the schema is sent to the model as `format` and validated by the
+ * server, so the task passes on the server's verdict (`structuredOutput.valid`) rather
+ * than on anything the browser could fake. That split is deliberate and is the same one
+ * docs/04-curriculum.md describes.
+ */
+const PromptCheckSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('regex'),
+      pattern: z.string().min(1),
+      /** JS regex flags; `m` for the three-bullets check, `i` for the refusal. */
+      flags: z
+        .string()
+        .regex(/^[gimsuy]*$/)
+        .default(''),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('not_contains'),
+      value: z.string().min(1),
+      caseSensitive: z.boolean().default(false),
+    })
+    .strict(),
+  z
+    .object({
+      /** Passes when the server's structured-output validation succeeded. */
+      type: z.literal('structured'),
+      /** Sent verbatim as `ChatRequest.format`. */
+      schema: z.record(z.unknown()),
+      /** Extra shape assertions the schema alone cannot express, e.g. "three dates". */
+      minItems: z.record(z.number().int().nonnegative()).optional(),
+    })
+    .strict(),
+]);
+
+export const PromptConfigSchema = z
+  .object({
+    defaults: z
+      .object({
+        temperature: z.number().min(0).max(2).default(0.7),
+        topP: z.number().min(0).max(1).default(0.9),
+        /** `null` means "no seed": the model samples freely. */
+        seed: z.number().int().nullable().default(null),
+        systemPrompt: z.string().default(''),
+        userPrompt: z.string().default(''),
+      })
+      .strict(),
+    structuredOutput: z
+      .object({
+        enabled: z.boolean().default(true),
+        /** Pre-filled into the schema editor. */
+        defaultSchema: z.record(z.unknown()),
+        defaultPrompt: z.string().default(''),
+      })
+      .strict(),
+    reflectionMd: z.string().min(1).optional(),
+    tasks: z
+      .array(
+        z
+          .object({
+            ...TaskBaseShape,
+            /** Loaded into the prompt boxes by the "load this task" button. */
+            systemPrompt: z.string().optional(),
+            userPrompt: z.string().optional(),
+            /** True for the task that must be run in structured-output mode. */
+            structured: z.boolean().default(false),
+            check: PromptCheckSchema,
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
+export type PromptConfig = z.infer<typeof PromptConfigSchema>;
+export type PromptCheck = z.infer<typeof PromptCheckSchema>;
+export type PromptTask = PromptConfig['tasks'][number];
+
+// ------------------------------------------------------- Module 3 config (M8) ----
+
+/**
+ * Module 3 is one exercise record of kind `tokenizer` with three tabs, so its config is
+ * three sub-configs plus the shared task list. The sub-configs are exported and reused as
+ * the `embeddings` and `attention` entries in the registry below: those kinds exist in
+ * the Postgres enum and a later module may want one on its own, and having them share a
+ * definition means a tab can be split out later without re-authoring anything.
+ *
+ * Everything the three tabs draw is authored here rather than hard-coded in the React
+ * components, for the same reason the perceptron's datasets are: the content file is the
+ * thing a non-programmer edits, and a bad edit should fail at seed time with a path.
+ */
+
+/** A filename inside the module's own content directory. No slashes: no path traversal. */
+const contentFileName = (extension: string) =>
+  z
+    .string()
+    .regex(
+      new RegExp(`^[a-z0-9]+(?:-[a-z0-9]+)*\\.${extension}$`),
+      `must be a kebab-case *.${extension} filename inside the module directory`,
+    );
+
+const SampleSentenceSchema = z
+  .object({ id: SlugSchema, text: z.string().min(1).max(400) })
+  .strict();
+
+/**
+ * The tokenizer tab. The corpus is given either inline (`corpusText`) or as a sibling
+ * file (`corpusFile`) — a 5 KB paragraph is unreadable as a JSON string literal, so the
+ * shipped content uses the file, and the inline form exists so a test can build a tiny
+ * config without touching the filesystem.
+ */
+export const TokenizerTabConfigSchema = z
+  .object({
+    corpusFile: contentFileName('txt').optional(),
+    corpusText: z.string().min(50).optional(),
+    /** `[min, max]` for the merge slider; docs/04 asks for 50…500. */
+    mergeRange: z.tuple([z.number().int().min(1).max(5000), z.number().int().min(1).max(5000)]),
+    defaultMerges: z.number().int().min(1).max(5000),
+    /** The three sentences the `tokenize-three` task asks for. */
+    sampleSentences: z.array(SampleSentenceSchema).min(3).max(8),
+    /** Pre-filled into the text area on first mount. */
+    defaultText: z.string().min(1).max(400),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    if ((config.corpusFile === undefined) === (config.corpusText === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['corpusFile'],
+        message: 'give exactly one of corpusFile or corpusText',
+      });
+    }
+    const [min, max] = config.mergeRange;
+    if (min >= max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['mergeRange'],
+        message: `mergeRange must be increasing, got [${min}, ${max}]`,
+      });
+    }
+    if (config.defaultMerges < min || config.defaultMerges > max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['defaultMerges'],
+        message: `defaultMerges ${config.defaultMerges} is outside mergeRange [${min}, ${max}]`,
+      });
+    }
+    const ids = new Set(config.sampleSentences.map((sentence) => sentence.id));
+    if (ids.size !== config.sampleSentences.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sampleSentences'],
+        message: 'sample sentence ids must be unique',
+      });
+    }
+  });
+export type TokenizerTabConfig = z.infer<typeof TokenizerTabConfigSchema>;
+
+/** One plotted word. `cluster` is only a colour and a legend entry — PCA never sees it. */
+const EmbeddingWordSchema = z
+  .object({
+    word: z
+      .string()
+      .regex(/^[a-z]+$/, 'must be a single lowercase word')
+      .min(1)
+      .max(32),
+    cluster: SlugSchema,
+  })
+  .strict();
+
+export const EmbeddingsConfigSchema = z
+  .object({
+    words: z.array(EmbeddingWordSchema).min(6).max(200),
+    /** Shipped vectors, used whenever `POST /model/embed` is unavailable. */
+    fallbackFile: contentFileName('json'),
+    /** Seeds the `a - b + c` boxes so the tab is interesting before anyone types. */
+    defaultAnalogy: z
+      .object({ a: z.string().min(1), b: z.string().min(1), c: z.string().min(1) })
+      .strict(),
+    /** How many nearest words the analogy readout lists. */
+    neighbourCount: z.number().int().min(1).max(10).default(3),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    const words = new Set(config.words.map((entry) => entry.word));
+    if (words.size !== config.words.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['words'],
+        message: 'word list must not repeat a word',
+      });
+    }
+    for (const [key, word] of Object.entries(config.defaultAnalogy)) {
+      if (!words.has(word)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['defaultAnalogy', key],
+          message: `"${word}" is not in the word list`,
+        });
+      }
+    }
+  });
+export type EmbeddingsConfig = z.infer<typeof EmbeddingsConfigSchema>;
+
+const NumberMatrixSchema = z.array(z.array(z.number()).min(1)).min(2);
+
+/**
+ * The attention tab's hand-authored example. `Q`, `K` and `V` are written out in full
+ * rather than generated, because the whole point of the tab is that every number on the
+ * screen can be checked with a calculator — and Lesson 3.3 does exactly that for the
+ * query row of the last word.
+ */
+export const AttentionConfigSchema = z
+  .object({
+    words: z.array(z.string().min(1).max(24)).min(2).max(16),
+    /** Query/key dimension. Also the `d_k` under the square root. */
+    dk: z.number().int().min(1).max(16),
+    Q: NumberMatrixSchema,
+    K: NumberMatrixSchema,
+    V: NumberMatrixSchema,
+    defaultTemperature: z.number().positive().max(10).default(1),
+    defaultScale: z.boolean().default(true),
+    /** Row labels for the three 3-column matrices in the "edit vectors" panel. */
+    dimensionLabels: z.array(z.string().min(1).max(24)).optional(),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    const n = config.words.length;
+    for (const name of ['Q', 'K', 'V'] as const) {
+      const matrix = config[name];
+      if (matrix.length !== n) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [name],
+          message: `${name} has ${matrix.length} rows but there are ${n} words`,
+        });
+        continue;
+      }
+      // Q and K are dotted together, so both must be d_k wide. V may be any width:
+      // d_v is independent of d_k, and saying so here is cheaper than a lesson aside.
+      const expected = name === 'V' ? (matrix[0]?.length ?? 0) : config.dk;
+      matrix.forEach((row, index) => {
+        if (row.length !== expected) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [name, index],
+            message: `row ${index} has ${row.length} entries, expected ${expected}`,
+          });
+        }
+      });
+    }
+    if (config.dimensionLabels && config.dimensionLabels.length !== config.dk) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['dimensionLabels'],
+        message: `dimensionLabels must have dk (${config.dk}) entries`,
+      });
+    }
+  });
+export type AttentionConfig = z.infer<typeof AttentionConfigSchema>;
+
+/**
+ * One check per tab, as a discriminated union rather than a bag of optional fields.
+ * The three tasks measure genuinely different things (a count and a choice, a word, a
+ * matrix index), and a union means each `checks.ts` receives a narrowed type instead of
+ * asserting that the field it cares about is set.
+ */
+const TokenizerCheckSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('tokenize'),
+      /** How many of `sampleSentences` must have been run through the tokenizer. */
+      sentencesTokenized: z.number().int().positive(),
+      /** The sample sentence that produces the most tokens — the "count question". */
+      answerSentenceId: SlugSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('neighbour'),
+      targetWord: z.string().min(1),
+      /**
+       * More than one may be accepted: the tab prefers live vectors from Ollama and falls
+       * back to the shipped ones, and the two need not agree on a near-tie.
+       */
+      acceptable: z.array(z.string().min(1)).min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('attention-row'),
+      /** Index into `attention.words` of the row being read. */
+      queryIndex: z.number().int().nonnegative(),
+      /** Index, not a word: the sample sentence contains "the" twice. */
+      expectedKeyIndex: z.number().int().nonnegative(),
+    })
+    .strict(),
+]);
+export type TokenizerCheck = z.infer<typeof TokenizerCheckSchema>;
+
+export const TokenizerConfigSchema = z
+  .object({
+    /** Tab order, left to right. */
+    tabs: z
+      .array(z.enum(['tokenizer', 'embeddings', 'attention']))
+      .min(1)
+      .max(3),
+    tokenizer: TokenizerTabConfigSchema,
+    embeddings: EmbeddingsConfigSchema,
+    attention: AttentionConfigSchema,
+    reflectionMd: z.string().min(1).optional(),
+    tasks: z.array(z.object({ ...TaskBaseShape, check: TokenizerCheckSchema }).strict()).min(1),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    const tabs = new Set(config.tabs);
+    if (tabs.size !== config.tabs.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['tabs'], message: 'tabs must be unique' });
+    }
+    config.tasks.forEach((task, index) => {
+      const at = (field: string) => ['tasks', index, 'check', field];
+      if (task.check.kind === 'tokenize') {
+        const ids = config.tokenizer.sampleSentences.map((sentence) => sentence.id);
+        if (!ids.includes(task.check.answerSentenceId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: at('answerSentenceId'),
+            message: `"${task.check.answerSentenceId}" is not a sample sentence id`,
+          });
+        }
+        if (task.check.sentencesTokenized > config.tokenizer.sampleSentences.length) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: at('sentencesTokenized'),
+            message: 'asks for more sentences than sampleSentences provides',
+          });
+        }
+      }
+      if (task.check.kind === 'neighbour') {
+        const words = new Set(config.embeddings.words.map((entry) => entry.word));
+        for (const word of [task.check.targetWord, ...task.check.acceptable]) {
+          if (!words.has(word)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: at('targetWord'),
+              message: `"${word}" is not in the embeddings word list`,
+            });
+          }
+        }
+      }
+      if (task.check.kind === 'attention-row') {
+        const n = config.attention.words.length;
+        for (const [field, value] of [
+          ['queryIndex', task.check.queryIndex],
+          ['expectedKeyIndex', task.check.expectedKeyIndex],
+        ] as const) {
+          if (value >= n) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: at(field),
+              message: `${field} ${value} is out of range for ${n} words`,
+            });
+          }
+        }
+      }
+    });
+  });
+export type TokenizerConfig = z.infer<typeof TokenizerConfigSchema>;
+
+/**
+ * `content/modules/03-how-llms-work/embeddings-precomputed.json`, generated by
+ * `pnpm content:embeddings` and shipped with the app so the embeddings tab works with
+ * `MODEL_PROVIDER=none`.
+ *
+ * It is validated in three places for three different reasons: the generator validates
+ * what it wrote, a web test validates the committed file, and the browser validates it at
+ * import time — because a truncated vector would otherwise surface as a PCA of `NaN`.
+ */
+export const PrecomputedEmbeddingsSchema = z
+  .object({
+    model: z.string().min(1),
+    dimensions: z.number().int().positive(),
+    generatedAt: z.string().datetime(),
+    vectors: z.record(z.array(z.number().finite()).min(1)),
+  })
+  .strict()
+  .superRefine((file, ctx) => {
+    for (const [word, vector] of Object.entries(file.vectors)) {
+      if (vector.length !== file.dimensions) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['vectors', word],
+          message: `has ${vector.length} components, expected ${file.dimensions}`,
+        });
+      }
+    }
+  });
+export type PrecomputedEmbeddings = z.infer<typeof PrecomputedEmbeddingsSchema>;
+
+/**
  * `satisfies` rather than a type annotation: the annotation would widen every entry to
  * `z.ZodType<Record<string, unknown>>` and the web app could no longer do
  * `z.infer<typeof ExerciseConfigSchemas.perceptron>` to get its typed config for free.
@@ -288,11 +694,17 @@ export type MlpConfig = z.infer<typeof MlpConfigSchema>;
 export const ExerciseConfigSchemas = {
   perceptron: PerceptronConfigSchema,
   mlp: MlpConfigSchema,
-  tokenizer: LooseConfigSchema,
-  embeddings: LooseConfigSchema,
-  attention: LooseConfigSchema,
-  prompt: LooseConfigSchema,
-  structured_output: LooseConfigSchema,
+  tokenizer: TokenizerConfigSchema,
+  // Module 3 ships one record of kind `tokenizer` carrying all three tabs. These two
+  // kinds are the same tab configs standing alone, ready for a module that wants only
+  // one of them; nothing in `content/` uses them yet.
+  embeddings: EmbeddingsConfigSchema,
+  attention: AttentionConfigSchema,
+  prompt: PromptConfigSchema,
+  // Module 4's structured-output mode is a *sub-mode* of the `prompt` exercise rather
+  // than a second exercise row, so this kind shares its config schema. The enum keeps
+  // the kind because docs/02-schema.md defines it and a later module may want it alone.
+  structured_output: PromptConfigSchema,
   agent: LooseConfigSchema,
   harness: LooseConfigSchema,
 } satisfies Record<ExerciseKind, z.ZodTypeAny>;

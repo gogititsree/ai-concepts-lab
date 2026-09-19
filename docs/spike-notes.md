@@ -236,3 +236,30 @@ mutually exclusive on this model. The original 3/5 result was thinking being on 
 
 **Consequence for M9:** `OllamaProvider` sends `think: false` on every request. A lesson that wants to
 display the model's reasoning must request it explicitly and must not also pass `format`.
+
+## M9 measurements (2026-09-19, real provider, end to end)
+
+Measured through `POST /api/v1/model/chat` with `MODEL_PROVIDER=ollama`, `gemma4:latest`,
+temperature 0, against a real Postgres. Not a benchmark; these are the numbers a learner
+will actually wait for on this machine.
+
+| call | latency | prompt tokens | completion tokens |
+|---|---|---|---|
+| plain chat ("reply with: pong"), cold model load | 32.3 s | 16 | 2 |
+| structured output, 3 dates, JSON schema, warm | 13.1 s | 64 | 40 |
+| embeddings, 2 short inputs (`nomic-embed-text`, 768 dims) | < 1 s | — | — |
+
+Structured output returned valid JSON on the first attempt with `retried: false`, which is
+the `think:false` fix from the earlier follow-up holding through the real adapter.
+
+Both calls persisted correctly for the observability work in M10/M14:
+
+```
+agent_runs:  prompt     | completed | ollama | gemma4:latest | iter 1 | 16/2  tok | 32314 ms
+             structured | completed | ollama | gemma4:latest | iter 1 | 64/40 tok | 13080 ms
+agent_run_steps: (0 model_call, 1 final) for each run, latency on the model_call step
+```
+
+**The cold-load penalty is the headline.** The first call after idle costs ~20 s more than a
+warm one. `keep_alive: '10m'` covers a working session, but the first exercise run of the day
+will feel broken without the elapsed-time counter the playground now shows.

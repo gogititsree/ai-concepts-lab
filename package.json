@@ -24,7 +24,8 @@
     "db:migrate": "pnpm --filter api run db:migrate",
     "db:seed": "pnpm --filter @lab/shared run build && pnpm --filter api run db:seed",
     "db:studio": "pnpm --filter api run db:studio",
-    "test:integration": "pnpm --filter api run test:integration"
+    "test:integration": "pnpm --filter api run test:integration",
+    "content:embeddings": "pnpm --filter @lab/shared run build && node apps/api/scripts/generate-embeddings.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.37.0",

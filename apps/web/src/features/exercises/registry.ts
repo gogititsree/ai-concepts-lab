@@ -3,6 +3,8 @@ import type { ComponentType } from 'react';
 
 import { MlpExercise } from './mlp/MlpExercise';
 import { PerceptronExercise } from './perceptron/PerceptronExercise';
+import { PromptExercise } from './prompt/PromptExercise';
+import { TokenizerExercise } from './tokenizer/TokenizerExercise';
 
 /**
  * `exercise.kind` -> the component that plays it.
@@ -25,4 +27,12 @@ export const EXERCISE_REGISTRY: Partial<
 > = {
   perceptron: PerceptronExercise,
   mlp: MlpExercise,
+  // M8: Module 3 ships one record of kind `tokenizer` carrying all three tabs, so this
+  // single entry covers tokenization, embeddings and attention. The `embeddings` and
+  // `attention` kinds have config schemas of their own but no content uses them alone.
+  tokenizer: TokenizerExercise,
+  // M9. `structured_output` is a sub-mode of the same component rather than a separate
+  // exercise row, so it maps to the same entry.
+  prompt: PromptExercise,
+  structured_output: PromptExercise,
 };

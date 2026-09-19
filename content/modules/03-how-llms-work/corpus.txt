@@ -1,0 +1,70 @@
+Language models do not read letters and they do not read words. They read tokens, and a
+token is whatever the tokenizer decided a token should be. This corpus exists so that a
+tokenizer can be trained on it in a browser tab, in front of you, in about the time it
+takes to move a slider.
+
+A tokenizer is trained, not designed. Byte pair encoding starts with the alphabet, counts
+every adjacent pair of symbols in the training text, merges the most frequent pair into a
+single new symbol, and then does it again. After ten merges the vocabulary has learned the
+most common letter pairs. After a hundred it has learned common endings and short words.
+After five hundred it has learned whole words, and the words it learned are the words this
+text repeats. Train it on a corpus about cooking and it learns cooking. Train it on a
+corpus about the weather and it learns the weather. A tokenizer is a compressed portrait
+of the text it was trained on, which is why a model trained mostly on English pays more
+per character for every other language on earth.
+
+The counting is the whole algorithm. Take the word lower, written as l o w e r with an end
+of word marker after the r. Take the word lowest, written the same way. The pair l o
+appears in both, so it appears at least twice, and if no other pair appears more often
+then l o is merged into lo. Now lower is lo w e r and lowest is lo w e s t. Count again.
+The pair lo w now appears twice, so it becomes low. Count again. Nothing in this tiny
+example appears twice any more except the end of word marker, so training stops early. A
+real corpus never runs out that quickly, but a small one does, and that is worth seeing.
+
+Every merge is a bet that the pair it merged will keep appearing. The bet is cheap and it
+is made thousands of times, which is why byte pair encoding works at all. Nobody chose the
+subwords. The counting chose them.
+
+Once the merges are learned, encoding a new piece of text is a replay. Split the text into
+words, split each word into characters, then apply the learned merges in the order they
+were learned. The order matters. A merge learned early is applied early, so the pieces it
+built are available to the merges that come after it. This is why the merge table is a
+list and not a set, and why two tokenizers trained on the same text with different merge
+counts are not the same tokenizer with a bigger vocabulary. They are different tokenizers.
+
+What about a character the tokenizer has never seen? It becomes an unknown token. A model
+whose tokenizer was trained only on English text will shred an emoji, a Greek letter or a
+Chinese character into unknowns or into long runs of tiny pieces. Real production
+tokenizers work on raw bytes for exactly this reason, so that nothing is ever truly
+unknown, only expensive. The tokenizer in this lesson works on characters, which makes the
+unknown token visible instead of hiding it behind a byte fallback. Seeing it is the point.
+
+Tokens are the unit of money and the unit of memory. An interface that charges per token
+is charging per merge that did not happen. A context window measured in tokens is a
+working memory measured in tokens, and the same paragraph can cost two hundred tokens or
+four hundred depending on nothing but the tokenizer. Long numbers are expensive. Unusual
+formatting is expensive. Code with deep indentation is expensive. Ordinary prose in the
+training language is cheap, because ordinary prose in the training language is exactly
+what the merges were fitted to.
+
+This also explains a famous class of failure. Ask a model how many times the letter r
+appears in a word and it may well get it wrong, because it never saw the letters. It saw
+two or three chunks and it has to infer the spelling from what it learned about those
+chunks. The model is not bad at counting. It is reasoning about an object it cannot see.
+Rhyme, acrostics, letter reversal and spelling games all live in the same blind spot, and
+they all have the same cause, which is not intelligence and is not attention. It is the
+tokenizer.
+
+After tokenizing comes the part everyone talks about. Each token id becomes a vector, the
+vectors are mixed by attention so that each position can look at the positions that matter
+to it, and a final layer turns the mixed vectors back into a guess about the next token.
+Every one of those steps is arithmetic you can do by hand on a small example, and every
+one of them is in this app. But none of them can start until the text has been cut into
+pieces, and the pieces are not words, and the pieces were never designed. They were
+counted.
+
+Slide the merge count and watch the same sentence change shape. At fifty merges the text
+is a shower of fragments and the sequence is long. At five hundred merges whole words
+survive intact and the sequence is short. The vocabulary got bigger and the sequence got
+shorter, and that trade is the only knob there is. Every tokenizer in every model is a
+particular answer to it.

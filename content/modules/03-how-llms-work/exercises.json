@@ -8,45 +8,137 @@
     "config": {
       "tabs": ["tokenizer", "embeddings", "attention"],
       "tokenizer": {
-        "corpus": "bundled-5kb",
+        "corpusFile": "corpus.txt",
         "mergeRange": [50, 500],
-        "defaultMerges": 200
+        "defaultMerges": 200,
+        "defaultText": "tokens are the unit of money and the unit of memory",
+        "sampleSentences": [
+          {
+            "id": "in-domain",
+            "text": "the tokenizer counted every pair of symbols in the training text"
+          },
+          {
+            "id": "out-of-domain",
+            "text": "zebras waltz quixotically through the fog"
+          },
+          {
+            "id": "digits-and-symbols",
+            "text": "strawberry jam costs 1234567890 dollars a jar"
+          }
+        ]
       },
       "embeddings": {
-        "wordListId": "clusters-40",
-        "fallbackFile": "embeddings-precomputed.json"
+        "fallbackFile": "embeddings-precomputed.json",
+        "neighbourCount": 3,
+        "defaultAnalogy": { "a": "king", "b": "man", "c": "woman" },
+        "words": [
+          { "word": "cat", "cluster": "animals" },
+          { "word": "dog", "cluster": "animals" },
+          { "word": "horse", "cluster": "animals" },
+          { "word": "wolf", "cluster": "animals" },
+          { "word": "tiger", "cluster": "animals" },
+          { "word": "mouse", "cluster": "animals" },
+          { "word": "rabbit", "cluster": "animals" },
+          { "word": "eagle", "cluster": "animals" },
+          { "word": "salmon", "cluster": "animals" },
+          { "word": "bear", "cluster": "animals" },
+          { "word": "france", "cluster": "countries" },
+          { "word": "germany", "cluster": "countries" },
+          { "word": "japan", "cluster": "countries" },
+          { "word": "brazil", "cluster": "countries" },
+          { "word": "canada", "cluster": "countries" },
+          { "word": "egypt", "cluster": "countries" },
+          { "word": "india", "cluster": "countries" },
+          { "word": "norway", "cluster": "countries" },
+          { "word": "run", "cluster": "verbs" },
+          { "word": "walk", "cluster": "verbs" },
+          { "word": "jump", "cluster": "verbs" },
+          { "word": "swim", "cluster": "verbs" },
+          { "word": "write", "cluster": "verbs" },
+          { "word": "read", "cluster": "verbs" },
+          { "word": "sing", "cluster": "verbs" },
+          { "word": "sleep", "cluster": "verbs" },
+          { "word": "one", "cluster": "numbers" },
+          { "word": "two", "cluster": "numbers" },
+          { "word": "three", "cluster": "numbers" },
+          { "word": "four", "cluster": "numbers" },
+          { "word": "five", "cluster": "numbers" },
+          { "word": "six", "cluster": "numbers" },
+          { "word": "seven", "cluster": "numbers" },
+          { "word": "eight", "cluster": "numbers" },
+          { "word": "king", "cluster": "people" },
+          { "word": "queen", "cluster": "people" },
+          { "word": "prince", "cluster": "people" },
+          { "word": "princess", "cluster": "people" },
+          { "word": "man", "cluster": "people" },
+          { "word": "woman", "cluster": "people" },
+          { "word": "boy", "cluster": "people" },
+          { "word": "girl", "cluster": "people" }
+        ]
       },
       "attention": {
-        "sentence": "the cat sat on the mat because it was warm",
-        "dim": 3
+        "words": ["the", "cat", "sat", "on", "the", "mat", "because", "it"],
+        "dk": 3,
+        "dimensionLabels": ["thing", "place", "glue"],
+        "defaultTemperature": 1,
+        "defaultScale": true,
+        "Q": [
+          [0.2, 0.2, 2.0],
+          [1.6, 0.4, 0.2],
+          [1.8, 1.4, 0.0],
+          [0.4, 2.2, 0.2],
+          [0.2, 0.2, 2.0],
+          [1.4, 0.6, 0.4],
+          [0.8, 0.8, 1.6],
+          [2.4, 2.4, -0.8]
+        ],
+        "K": [
+          [0.1, 0.0, 1.0],
+          [1.0, 0.1, 0.0],
+          [0.2, 0.6, 0.1],
+          [0.0, 0.9, 0.8],
+          [0.1, 0.0, 1.0],
+          [0.9, 1.0, 0.0],
+          [0.0, 0.1, 0.9],
+          [0.5, 0.4, 0.3]
+        ],
+        "V": [
+          [0.0, 0.0, 0.2],
+          [1.0, 0.0, 0.0],
+          [0.0, 0.6, 0.1],
+          [0.0, 0.5, 0.3],
+          [0.0, 0.0, 0.2],
+          [0.7, 0.9, 0.0],
+          [0.0, 0.1, 0.8],
+          [0.3, 0.3, 0.3]
+        ]
       },
+      "reflectionMd": "Three tabs, one pipeline. Write down the token count your favourite sentence had at 50 merges and at 500, and then the thing that is easy to miss: the attention weights for **it** never became a one-hot. Even at the sharpest setting the row still spends a fifth of its mass elsewhere. A model that could only look at one word would be a lookup table.",
       "tasks": [
         {
           "id": "tokenize-three",
-          "label": "Tokenize the three provided sentences and answer the count question",
+          "label": "Tokenize all three sample sentences, then say which one costs the most tokens",
+          "hintMd": "Use the three buttons above the text area. The count is in the stats row; the answer does not change as you move the merge slider, which is itself worth noticing.",
           "check": {
-            "sentencesTokenized": 3
+            "kind": "tokenize",
+            "sentencesTokenized": 3,
+            "answerSentenceId": "digits-and-symbols"
           }
         },
         {
           "id": "find-neighbour",
-          "label": "Report the nearest word to the given one",
-          "check": {
-            "answer": "nearestWord"
-          }
+          "label": "Find the nearest word to \"wolf\" by cosine similarity",
+          "hintMd": "Click **wolf** in the scatter, then click a second word to read the cosine. The nearest-words list under the analogy box ranks them for you.",
+          "check": { "kind": "neighbour", "targetWord": "wolf", "acceptable": ["dog"] }
         },
         {
           "id": "attention-row",
-          "label": "Identify which word 'it' attends to most",
-          "check": {
-            "answer": "attentionArgmax"
-          }
+          "label": "Read the attention row for \"it\" and pick the word it attends to most",
+          "hintMd": "Row 8 of the heatmap, or hover **it** and watch the arcs. One key gets nearly half the row.",
+          "check": { "kind": "attention-row", "queryIndex": 7, "expectedKeyIndex": 5 }
         }
       ]
     },
-    "completionRule": {
-      "type": "tasks",
-      "required": 2
-    }
+    "completionRule": { "type": "tasks", "required": 2 }
   }
 ]

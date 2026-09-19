@@ -297,16 +297,18 @@ describe('per-kind exercise config schemas', () => {
   });
 
   it('leaves the kinds later milestones own loose', () => {
-    const tokenizer = [
+    // `tokenizer` was this example until M8 tightened it; `agent` (M10) is the next
+    // kind still on the loose record schema.
+    const agent = [
       {
-        slug: 'bpe',
-        title: 'BPE',
-        kind: 'tokenizer',
+        slug: 'tool-loop',
+        title: 'Tool loop',
+        kind: 'agent',
         orderIndex: 1,
         config: { anything: ['goes', 'for', 'now'] },
         completionRule: { type: 'manual' },
       },
     ];
-    expect(ExercisesFileSchema.safeParse(tokenizer).success).toBe(true);
+    expect(ExercisesFileSchema.safeParse(agent).success).toBe(true);
   });
 });

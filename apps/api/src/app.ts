@@ -15,6 +15,8 @@ import { config as defaultConfig, type Config } from './config.js';
 import { db as defaultDb, type Db } from './db/client.js';
 import { contentRoutes } from './content/routes.js';
 import { healthRoutes, type HealthRoutesOptions } from './routes/health.js';
+import { embedRoute } from './model/embedRoute.js';
+import { modelRoutes } from './model/routes.js';
 import { progressRoutes } from './progress/routes.js';
 import { registerCsrfGuard } from './plugins/csrf.js';
 import { registerErrorHandler } from './plugins/error-handler.js';
@@ -147,6 +149,19 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
     },
     { prefix: '/api/v1' },
   );
+
+  // M9: the model API. Registered *outside* the guarded scope above because
+  // `GET /model/health` must answer without a session -- the UI banner that explains a
+  // missing model has to render on the logged-out dashboard. The plugin applies
+  // `requireFullSession` to everything else it owns.
+  await app.register(modelRoutes, {
+    prefix: '/api/v1',
+    rateLimits: opts.rateLimits ?? true,
+  });
+
+  // M8: POST /model/embed, for Module 3's embeddings tab. Its own plugin (and its own
+  // guard) until M9 folds it into the provider seam; see `model/embedRoute.ts`.
+  await app.register(embedRoute, { prefix: '/api/v1' });
 
   const webDistPath = opts.webDistPath ?? defaultWebDistPath;
   const serveSpa = cfg.NODE_ENV === 'production' && existsSync(webDistPath);
