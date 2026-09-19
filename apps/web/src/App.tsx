@@ -12,6 +12,8 @@ import { QuizPage } from './routes/QuizPage';
 import { LoginPage } from './routes/auth/LoginPage';
 import { MfaPage } from './routes/auth/MfaPage';
 import { RegisterPage } from './routes/auth/RegisterPage';
+import { RunDetailPage } from './routes/runs/RunDetailPage';
+import { RunsPage } from './routes/runs/RunsPage';
 import { SecuritySettingsPage } from './routes/auth/SecuritySettingsPage';
 
 /**
@@ -55,6 +57,24 @@ export function App() {
           element={
             <RequireAuth>
               <SecuritySettingsPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* M10 fills these in; the trace viewer is shared by modules 5 and 6 and the SRE lesson. */}
+        <Route
+          path="/runs"
+          element={
+            <RequireAuth>
+              <RunsPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/runs/:id"
+          element={
+            <RequireAuth>
+              <RunDetailPage />
             </RequireAuth>
           }
         />
