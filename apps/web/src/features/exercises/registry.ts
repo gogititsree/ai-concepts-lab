@@ -2,6 +2,7 @@ import type { ExerciseDetail, ExerciseKind } from '@lab/shared';
 import type { ComponentType } from 'react';
 
 import { AgentExercise } from './agent/AgentExercise';
+import { HarnessExercise } from './harness/HarnessExercise';
 import { MlpExercise } from './mlp/MlpExercise';
 import { PerceptronExercise } from './perceptron/PerceptronExercise';
 import { PromptExercise } from './prompt/PromptExercise';
@@ -37,6 +38,9 @@ export const EXERCISE_REGISTRY: Partial<
   prompt: PromptExercise,
   structured_output: PromptExercise,
   // M10. The loop runs on the server; this component is the controls plus the streaming
-  // trace. M11 adds `harness`, which is the same trace fed by the learner's own loop.
+  // trace.
   agent: AgentExercise,
+  // M11. The same trace viewer, fed by a loop the learner wrote, running in a Web Worker
+  // in their own browser. The server only opens the run and accepts the steps.
+  harness: HarnessExercise,
 };

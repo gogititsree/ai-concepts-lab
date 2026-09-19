@@ -512,6 +512,132 @@ export const AgentConfigSchema = z
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 export type AgentTask = AgentConfig['tasks'][number];
 
+// ------------------------------------------------- Module 6 config (M11) ----
+
+/**
+ * The three scripted scenarios the in-worker fake model plays (docs/04-curriculum.md →
+ * Module 6). They are named here rather than in the web app because the exercise config
+ * references them, and a content file naming a fourth scenario nobody implemented should
+ * fail at seed time rather than as a check that never goes green.
+ */
+export const HARNESS_SCENARIO_IDS = ['single-tool', 'malformed-args', 'never-stops'] as const;
+export const HarnessScenarioIdSchema = z.enum(HARNESS_SCENARIO_IDS);
+export type HarnessScenarioId = z.infer<typeof HarnessScenarioIdSchema>;
+
+/**
+ * The three auto-checks, and the scenarios each one needs in order to mean anything.
+ *
+ * The map is the reason `scriptedScenarios` and `tasks` cannot drift apart: the
+ * refinement below reads it, so a config that offers a check without the scenario it
+ * inspects is a seed-time error naming both.
+ */
+export const HARNESS_CHECK_IDS = ['terminates', 'appends-tool-message', 'max-iterations'] as const;
+export const HarnessCheckIdSchema = z.enum(HARNESS_CHECK_IDS);
+export type HarnessCheckId = z.infer<typeof HarnessCheckIdSchema>;
+
+export const HARNESS_CHECK_SCENARIOS: Record<HarnessCheckId, readonly HarnessScenarioId[]> = {
+  terminates: ['single-tool'],
+  // Two scenarios on purpose: appending a *successful* result is the easy half, and
+  // appending the *error* from a malformed call is the half that separates a loop which
+  // treats failures as observations from one that throws them away.
+  'appends-tool-message': ['single-tool', 'malformed-args'],
+  'max-iterations': ['never-stops'],
+};
+
+const HarnessCheckSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('scripted'), check: HarnessCheckIdSchema }).strict(),
+  /**
+   * One completed run against the real model. Encouraged, never required: local
+   * inference is 10-70 s per call (docs/spike-notes.md) and Module 6 has to stay
+   * completable on a laptop with no Ollama, so `completionRule.required` is 3.
+   */
+  z.object({ type: z.literal('real-run') }).strict(),
+]);
+export type HarnessCheck = z.infer<typeof HarnessCheckSchema>;
+
+/**
+ * Module 6's `harness` exercise (M11).
+ *
+ * The learner's own `runAgent` runs in a Web Worker in their browser, so this config
+ * carries the two things the worker needs and nothing it does not: the starter source it
+ * is pre-filled with, and which deterministic scenarios the scripted model may play.
+ *
+ * `workerTools` is a *browser* tool set, not the server catalog: these are implemented in
+ * `apps/web/src/features/exercises/harness/workerTools.ts` and executed in the worker.
+ * See `docs/adr/0003-harness-worker-deviations.md` for why `lookup_glossary`, which
+ * docs/04 lists, is not among them.
+ */
+export const HarnessWorkerToolNameSchema = z.enum(['calculator', 'get_current_time']);
+export type HarnessWorkerToolName = z.infer<typeof HarnessWorkerToolNameSchema>;
+
+export const HarnessConfigSchema = z
+  .object({
+    /** Only one runtime exists, and naming it in content keeps decision 4 visible. */
+    runtime: z.literal('web-worker'),
+    /** The stub the editor opens with, TODO comments and all. */
+    starterCode: z.string().min(1).max(8000),
+    workerTools: z.array(HarnessWorkerToolNameSchema).min(1),
+    scriptedScenarios: z.array(HarnessScenarioIdSchema).min(1),
+    /** The cap handed to the learner's loop in scripted mode; `max-iterations` counts to it. */
+    scriptedMaxIterations: z.number().int().min(2).max(15).default(6),
+    /** What the optional real run sends. Deliberately a short question: see the latencies. */
+    realRun: z
+      .object({
+        systemPrompt: z.string().max(4000).default(''),
+        userPrompt: z.string().min(1).max(4000),
+        maxIterations: z.number().int().min(1).max(15).default(4),
+      })
+      .strict(),
+    reflectionMd: z.string().min(1).optional(),
+    tasks: z
+      .array(z.object({ ...TaskBaseShape, check: HarnessCheckSchema }).strict())
+      .min(1)
+      .max(10),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    const scenarios = new Set(config.scriptedScenarios);
+    if (scenarios.size !== config.scriptedScenarios.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['scriptedScenarios'],
+        message: 'scriptedScenarios must not repeat a scenario',
+      });
+    }
+    const seenChecks = new Set<string>();
+    config.tasks.forEach((task, index) => {
+      if (task.check.type !== 'scripted') return;
+      if (seenChecks.has(task.check.check)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['tasks', index, 'check', 'check'],
+          message: `two tasks both claim the "${task.check.check}" check`,
+        });
+      }
+      seenChecks.add(task.check.check);
+      for (const needed of HARNESS_CHECK_SCENARIOS[task.check.check]) {
+        if (!scenarios.has(needed)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['tasks', index, 'check'],
+            message: `the "${task.check.check}" check reads the "${needed}" scenario, which is not in scriptedScenarios`,
+          });
+        }
+      }
+    });
+    // The starter must not accidentally ship the answer. A stub that already loops is
+    // the one content mistake that would silently make every check pass on day one.
+    if (!/runAgent/.test(config.starterCode)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['starterCode'],
+        message: 'the starter code must define a function called runAgent',
+      });
+    }
+  });
+export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
+export type HarnessTask = HarnessConfig['tasks'][number];
+
 // ------------------------------------------------------- Module 3 config (M8) ----
 
 /**
@@ -855,7 +981,9 @@ export const ExerciseConfigSchemas = {
   // M10: Module 5. Tightened from the loose record so a task whose check names a tool
   // the picker never offers fails at seed time rather than as a task nobody can pass.
   agent: AgentConfigSchema,
-  harness: LooseConfigSchema,
+  // M11: Module 6. The learner's loop runs in a Web Worker; the config carries the
+  // starter source and which deterministic scenarios the scripted model may play.
+  harness: HarnessConfigSchema,
 } satisfies Record<ExerciseKind, z.ZodTypeAny>;
 
 /** Indexing the map above gives a union of schema types; this collapses it to something callable. */

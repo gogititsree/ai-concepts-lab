@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   AgentConfigSchema,
   ExercisesFileSchema,
+  HARNESS_CHECK_SCENARIOS,
+  HarnessConfigSchema,
   PerceptronConfigSchema,
   LessonFrontmatterSchema,
   ModuleFileSchema,
@@ -297,9 +299,11 @@ describe('per-kind exercise config schemas', () => {
     expect(ExercisesFileSchema.safeParse(mlp(bad)).success).toBe(false);
   });
 
-  it('leaves the kinds later milestones own loose', () => {
-    // `tokenizer` was this example until M8 tightened it and `agent` until M10 did;
-    // `harness` (M11) is the last kind still on the loose record schema.
+  it('no longer leaves any kind on the loose record schema', () => {
+    // This test used to assert the opposite. `tokenizer` was the loose example until M8
+    // tightened it, `agent` until M10 did, and M11 was the last one: every kind in
+    // `ExerciseKindSchema` now has a real schema, so a config typo is a seed-time error
+    // with a path for all of them. Kept, inverted, as the record of that.
     const harness = [
       {
         slug: 'write-the-loop',
@@ -310,7 +314,7 @@ describe('per-kind exercise config schemas', () => {
         completionRule: { type: 'manual' },
       },
     ];
-    expect(ExercisesFileSchema.safeParse(harness).success).toBe(true);
+    expect(ExercisesFileSchema.safeParse(harness).success).toBe(false);
   });
 });
 
@@ -402,5 +406,109 @@ describe('agent exercise config', () => {
     expect(
       ExercisesFileSchema.safeParse(agent({ ...validAgent, defaultMaxIterations: 16 })).success,
     ).toBe(false);
+  });
+});
+
+describe('harness exercise config', () => {
+  const validHarness = {
+    runtime: 'web-worker',
+    starterCode: 'async function runAgent(model, tools, userMessage, options) { /* TODO */ }',
+    workerTools: ['calculator'],
+    scriptedScenarios: ['single-tool', 'malformed-args', 'never-stops'],
+    realRun: { userPrompt: 'What is 17 * 23?' },
+    tasks: [
+      {
+        id: 'check-terminates',
+        label: 'terminates',
+        check: { type: 'scripted', check: 'terminates' },
+      },
+      {
+        id: 'check-appends-tool-message',
+        label: 'appends',
+        check: { type: 'scripted', check: 'appends-tool-message' },
+      },
+      {
+        id: 'check-max-iterations',
+        label: 'caps',
+        check: { type: 'scripted', check: 'max-iterations' },
+      },
+      { id: 'real-run', label: 'optional real run', check: { type: 'real-run' } },
+    ],
+  };
+
+  const harness = (config: unknown) => [
+    {
+      slug: 'build-a-harness',
+      title: 'Build a harness',
+      kind: 'harness',
+      orderIndex: 1,
+      config,
+      completionRule: { type: 'tasks', required: 3 },
+    },
+  ];
+
+  it('accepts the shape the shipped content uses', () => {
+    expect(ExercisesFileSchema.safeParse(harness(validHarness)).success).toBe(true);
+  });
+
+  it('applies the iteration defaults', () => {
+    const parsed = HarnessConfigSchema.parse(validHarness);
+    expect(parsed.scriptedMaxIterations).toBe(6);
+    expect(parsed.realRun.maxIterations).toBe(4);
+    expect(parsed.realRun.systemPrompt).toBe('');
+  });
+
+  it('every check names the scenarios it reads, and they must be offered', () => {
+    // The map is the contract between the config and `checks.ts`; a check whose scenario
+    // is missing is a task nobody can pass, and it should be a seed-time error.
+    expect(HARNESS_CHECK_SCENARIOS['appends-tool-message']).toEqual([
+      'single-tool',
+      'malformed-args',
+    ]);
+    const bad = { ...validHarness, scriptedScenarios: ['single-tool', 'never-stops'] };
+    const result = ExercisesFileSchema.safeParse(harness(bad));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.message).join(' ')).toMatch(
+        /"malformed-args" scenario, which is not in scriptedScenarios/,
+      );
+    }
+  });
+
+  it('rejects two tasks claiming the same check', () => {
+    const bad = {
+      ...validHarness,
+      tasks: [
+        ...validHarness.tasks,
+        { id: 'again', label: 'again', check: { type: 'scripted', check: 'terminates' } },
+      ],
+    };
+    expect(ExercisesFileSchema.safeParse(harness(bad)).success).toBe(false);
+  });
+
+  it('rejects starter code that does not define runAgent', () => {
+    // The one content mistake that would silently make every check pass on day one is a
+    // starter that already contains a working loop; requiring the name is the cheap half
+    // of guarding against a starter that is wrong in the other direction.
+    const bad = { ...validHarness, starterCode: '// over to you' };
+    expect(ExercisesFileSchema.safeParse(harness(bad)).success).toBe(false);
+  });
+
+  it('rejects an unknown scenario, an unknown check and a repeated scenario', () => {
+    for (const bad of [
+      { ...validHarness, scriptedScenarios: ['single-tool', 'malformed-args', 'vibes'] },
+      {
+        ...validHarness,
+        tasks: [{ id: 'x', label: 'x', check: { type: 'scripted', check: 'vibes' } }],
+      },
+      {
+        ...validHarness,
+        scriptedScenarios: ['single-tool', 'single-tool', 'malformed-args', 'never-stops'],
+      },
+      { ...validHarness, workerTools: ['lookup_glossary'] },
+      { ...validHarness, runtime: 'server' },
+    ]) {
+      expect(ExercisesFileSchema.safeParse(harness(bad)).success).toBe(false);
+    }
   });
 });

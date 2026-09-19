@@ -4,43 +4,53 @@
     "title": "Build a harness",
     "kind": "harness",
     "orderIndex": 1,
-    "lessonSlug": "the-harness-is-the-loop",
+    "lessonSlug": "implement-run-agent",
     "config": {
       "runtime": "web-worker",
-      "starterFile": "runAgent.stub.js",
-      "workerTools": ["calculator", "get_current_time", "lookup_glossary"],
+      "starterCode": "// Implement the loop. The contract, in full:\n//\n//   model.chat(messages, options.toolDefs)\n//       -> { content: string, toolCalls: [{ id, name, args, parseOk, rawArgs? }] }\n//   tools[name](args)\n//       -> a JSON-able result, or THROWS an Error if the arguments are wrong\n//   return { finalText, messages }\n//\n// Three checks read what you return. They are described in lesson 2.\n\nasync function runAgent(model, tools, userMessage, options) {\n  const maxIterations = options.maxIterations;\n  const messages = [{ role: 'user', content: userMessage }];\n\n  // TODO 1: loop at most `maxIterations` times. Nothing in the model guarantees it will\n  //         ever stop asking for tools, so this loop has to.\n  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {\n    const reply = await model.chat(messages, options.toolDefs);\n    console.log('iteration', iteration, JSON.stringify(reply));\n\n    // TODO 2: if the reply asks for no tools, it IS the answer. Return it.\n    //         Careful: a reply can contain text AND ask for a tool in the same turn.\n\n    // TODO 3: push the assistant's reply onto `messages`, tool calls included.\n\n    // TODO 4: for each call in reply.toolCalls:\n    //           - if call.parseOk is false, the model's arguments were not JSON\n    //           - tools[call.name] may not exist\n    //           - the tool may throw\n    //         Whatever happens, append ONE message per call with role 'tool' carrying\n    //         the result (or the error) as its content. Errors are observations.\n  }\n\n  // TODO 5: you ran out of iterations. Say so honestly rather than inventing an answer.\n  return { finalText: '', messages };\n}\n",
+      "workerTools": ["calculator", "get_current_time"],
       "scriptedScenarios": ["single-tool", "malformed-args", "never-stops"],
+      "scriptedMaxIterations": 6,
+      "realRun": {
+        "systemPrompt": "You are a careful assistant with tools. Use the calculator tool for EVERY calculation, even easy ones. When you have the number, give a plain final answer with no tool call.",
+        "userPrompt": "A deposit of 2500 earns 7% interest compounded annually. What is the balance after 8 years? Give the number to two decimal places.",
+        "maxIterations": 4
+      },
+      "reflectionMd": "You have now written the loop twice: once here, and once by reading\n`apps/api/src/model/agentLoop.ts` in lesson 1. **What does the server's version do that\nyours does not, and which of those differences would you miss first in production?**",
       "tasks": [
         {
           "id": "check-terminates",
-          "label": "The loop returns a final answer for the single-tool scenario",
+          "label": "check-terminates — the single-tool scenario ends with the calculator's answer",
+          "hintMd": "Stop when the reply has **no tool calls**, not when it has some text. The scripted model narrates before it calls the tool, on purpose.",
           "check": {
-            "scenario": "single-tool",
-            "expect": "final"
+            "type": "scripted",
+            "check": "terminates"
           }
         },
         {
           "id": "check-appends-tool-message",
-          "label": "Tool results are appended as tool messages",
+          "label": "check-appends-tool-message — every tool result goes back as a `tool` message, including the failed one",
+          "hintMd": "Push the assistant's reply first, then one `{role:'tool', toolName, content}` per call. In the malformed-arguments scenario the tool **throws** — catch it and append the error instead.",
           "check": {
-            "scenario": "single-tool",
-            "expect": "toolMessageAppended"
+            "type": "scripted",
+            "check": "appends-tool-message"
           }
         },
         {
           "id": "check-max-iterations",
-          "label": "The loop stops at maxIterations when the model never finishes",
+          "label": "check-max-iterations — the never-stops scenario stops at exactly maxIterations model calls",
+          "hintMd": "Count iterations, and return without a final answer when you run out. `while (true)` passes the other two checks and hangs on this one.",
           "check": {
-            "scenario": "never-stops",
-            "expect": "maxIterations"
+            "type": "scripted",
+            "check": "max-iterations"
           }
         },
         {
           "id": "real-run",
-          "label": "Optional: one successful run against the real model",
+          "label": "real-run (optional) — one completed run against the real model",
+          "hintMd": "Needs Ollama running locally. Two model calls, 19–32 s warm and around a minute cold. Not required to complete the module.",
           "check": {
-            "scenario": "real",
-            "expect": "final"
+            "type": "real-run"
           }
         }
       ]

@@ -275,7 +275,7 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
           );
         }
 
-        const { exerciseId, runId, ...chatRequest } = request.body;
+        const { exerciseId, runId, iteration, ...chatRequest } = request.body;
         if (chatRequest.format !== undefined && chatRequest.options?.think === true) {
           throw new AppError(
             400,
@@ -366,10 +366,15 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
 
         // One `model_call` step per attempt, so a structured retry is two rows and "it
         // only worked the second time" is visible in the trace rather than inferred.
+        // `iteration` is the caller's loop counter (M11's harness sends one); a
+        // structured retry still advances within it, so a two-attempt call on pass 3 is
+        // iterations 3 and 4. Absent, it is 1, which is what a single-turn call has
+        // always recorded.
+        const baseIteration = iteration ?? 1;
         for (const [index, attempt] of attempts.entries()) {
           await recorder.step({
             kind: 'model_call',
-            iteration: index + 1,
+            iteration: baseIteration + index,
             content: attempt.message.content,
             latencyMs: attempt.latencyMs,
             promptTokens: attempt.usage.promptTokens,
@@ -382,7 +387,7 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
         if (ownsRun) {
           await recorder.step({
             kind: 'final',
-            iteration: totals.iterations,
+            iteration: baseIteration + totals.iterations - 1,
             content: response.message.content,
           });
           await recorder.finish({
@@ -396,7 +401,21 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             finalOutput: response.message.content,
           });
         } else {
-          await recorder.accumulate(totals);
+          // Appending to a run somebody else is driving: M11's in-browser harness, which
+          // opened a `harness` run and calls this endpoint once per iteration.
+          //
+          // `toolCalls: 0` rather than `totals.toolCalls`, and it is not a rounding
+          // error. This handler writes **only** `model_call` rows; the `tool_call` and
+          // `tool_result` rows are written by whoever actually executed the tool, through
+          // `POST /model/runs/:id/steps`, and that endpoint counts them. Counting the
+          // model's *request* here as well would make `tool_call_count` exactly twice the
+          // number of `tool_call` rows on every harness run — a rollup that disagrees with
+          // its own trace, which is the one thing a trace table must never do.
+          //
+          // `parseFailures` stays, because it is the opposite case: arguments that were
+          // not JSON are something only this handler sees (the client is handed `args`
+          // already parsed), and per docs/adr/0002 that counter is provider-side only.
+          await recorder.accumulate({ ...totals, toolCalls: 0 });
         }
 
         return {

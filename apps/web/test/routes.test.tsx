@@ -182,8 +182,13 @@ describe('the exercise route', () => {
   });
 
   it('says so, without crashing, for an exercise kind no milestone implements yet', async () => {
-    // M10 added `agent` to the registry, so `harness` (M11) is the last kind missing.
-    const exercise = exerciseDetail('harnesses');
+    // M11 filled in `harness`, so every kind that `content/` actually uses now has a
+    // component. The two that remain unmapped are `embeddings` and `attention`: they have
+    // config schemas of their own but Module 3 ships all three tabs as one `tokenizer`
+    // record, so nothing seeds them. Standing one up by hand keeps the route's
+    // "not implemented" branch covered rather than deleting a test because it went green
+    // for the wrong reason.
+    const exercise = { ...exerciseDetail('harnesses'), kind: 'embeddings' as const, config: {} };
     renderAt('/modules/harnesses/exercise', {
       'GET /api/v1/modules/harnesses': { body: moduleDetail('harnesses') },
       [`GET /api/v1/exercises/${exercise.id}`]: { body: exercise },

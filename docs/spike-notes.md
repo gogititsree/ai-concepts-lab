@@ -350,3 +350,72 @@ reported it in plain language and stopped. Exactly the behaviour the loop's
 "errors are observations" contract is supposed to produce, and the run is `completed`
 rather than `failed` because the *agent* did the right thing — a distinction the SLIs in
 M14 need to preserve.
+
+## M11 measurements (2026-09-19, real provider, learner's loop in the browser)
+
+Measured against `gemma4:latest`, `MODEL_PROVIDER=ollama`, temperature 0, real Postgres,
+same machine as the M9/M10 numbers. The loop is `REFERENCE_SOLUTION` from
+`apps/web/src/features/exercises/harness/reference.ts`, compiled with the same
+`new Function` sandbox the worker uses and driven through the real HTTP path: `POST
+/model/runs {kind:'harness'}` → `POST /model/chat {runId, iteration}` per pass → `POST
+/model/runs/:id/steps` for the tool rows and the `final`.
+
+### The canonical harness trace
+
+The exercise's shipped `realRun` prompts (the same compound-interest question Module 5
+uses, so the two traces are comparable):
+
+| # | kind | iter | tool | latency | tokens (p/c) | written by |
+|---|---|---|---|---|---|---|
+| 0 | model_call | 1 | — | 17 497 ms | 246 / 27 | server |
+| 1 | tool_call | 1 | calculator | — | — | **client** |
+| 2 | tool_result | 1 | calculator | **6 ms** | — | **client** |
+| 3 | model_call | 2 | — | 7 968 ms | 322 / 17 | server |
+| 4 | final | 2 | — | — | — | **client** |
+
+`status=completed`, `iteration_count=2`, `tool_call_count=1`,
+`tool_parse_failure_count=0`, 568 prompt tokens, 44 completion tokens,
+`model_latency_ms_total=25 465`, wall clock 25 841 ms. Final answer:
+`The balance after 8 years is **4295.47**.` The browser's calculator returned
+`4295.465449579802`; the model rounded it correctly and kept the markdown emphasis it
+had been using, which nothing asks it not to.
+
+Two runs, on two separate sessions:
+
+| run | call 1 | call 2 | wall clock |
+|---|---|---|---|
+| first of the session (cold-ish load) | 43 461 ms | 7 729 ms | 51 498 ms |
+| warm | 17 643 ms | 8 024 ms | 25 841 ms |
+
+Same shape as M10: **inference is over 99.9 % of the wall clock**, the browser-side tool
+executes in 6–11 ms, and the first call of a session costs roughly 2.5× a warm one. The
+five-minute page-side timeout is generous for a two-pass run; the 60-second scripted
+timeout is "your loop is spinning", not "your loop is slow" — a correct scripted run of
+all three scenarios finishes in under 50 ms with no I/O at all.
+
+### Two things this measurement changed in the code
+
+**Tool calls were being counted twice.** `POST /model/chat` rolled the model's *requested*
+tool calls into `agent_runs.tool_call_count` even when appending to a run it does not
+own — but in that mode it writes no `tool_call` row, and the browser reports one for the
+same call through `/steps`. The first real run came back with `tool_call_count: 2` and
+one `tool_call` step. Fixed by counting only model-call facts when `ownsRun` is false;
+`tool_parse_failure_count` stays server-side per ADR 0002, since only the server sees
+arguments that were not JSON.
+
+**Every appended `model_call` was landing in iteration 1.** The chat route stamped
+`iteration: index + 1` within a single request, so a two-pass harness run produced
+`model_call@1, tool_call@1, tool_result@1, model_call@1, final@2` and the trace viewer —
+which groups by iteration — drew a nonsense grouping. `ModelChatRequestSchema` now takes
+an optional `iteration` (the caller's loop counter, default 1, so single-turn calls are
+unchanged) and the worker passes its own counter through. The table above is the result.
+
+Neither was reachable before M11: the server loop owns both halves of its own trace, so
+the two writers only ever disagree when one of them is a browser.
+
+### The scripted path, for contrast
+
+Three scenarios, three fresh workers, no network, no timers: the whole check sweep is
+sub-50 ms and byte-identical across runs (asserted in `harnessCore.test.ts`). That is the
+entire reason Module 6 is completable with `MODEL_PROVIDER=none` — `completionRule`
+requires the three scripted checks and the real run above is the optional fourth task.
