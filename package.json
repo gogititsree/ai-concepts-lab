@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "pnpm -r --parallel run dev",
+    "setup:env": "node scripts/setup-env.mjs",
     "build": "pnpm -r run build",
     "lint": "eslint .",
     "format": "prettier --write .",

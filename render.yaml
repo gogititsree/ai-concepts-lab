@@ -28,3 +28,22 @@ services:
       # migrations as a Render pre-deploy command is M13's job.
       - key: DATABASE_URL
         sync: false
+      # --- Auth (M5) ---
+      # HMAC key for signing the `sid` cookie. A secret, so it is set in the dashboard
+      # (sync: false) and never committed. Rotating it logs everyone out, which is the
+      # intended emergency lever. Generate one with `pnpm setup:env` or
+      # `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"`.
+      - key: SESSION_SECRET
+        sync: false
+      # The public URL of this service (the API serves the SPA from its own origin in
+      # production). Not a secret, but it differs per Render service name, so it is set in
+      # the dashboard rather than hard-coded here and silently wrong on a rename.
+      - key: APP_ORIGIN
+        sync: false
+      # Render terminates TLS, so the cookie must be Secure...
+      - key: COOKIE_SECURE
+        value: true
+      # ...and the client IP arrives in X-Forwarded-For, which is only safe to trust
+      # because that proxy is always in front of the container here.
+      - key: TRUST_PROXY
+        value: true

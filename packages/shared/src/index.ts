@@ -31,3 +31,6 @@ export type {
   QuizOption,
   QuizQuestionFile,
 } from './content.js';
+
+// M5 auth contracts (schemas, types, password policy, common-password list).
+export * from './auth.js';
