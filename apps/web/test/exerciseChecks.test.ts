@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { getExercise } from '../src/content/static';
-import { parseExerciseConfig } from '../src/content/static';
+import { parseExerciseConfig } from '../src/features/content/exerciseConfig';
 import {
   bestRecord,
   evaluateMlpTasks,
@@ -9,21 +8,18 @@ import {
   type MlpMeasurements,
 } from '../src/features/exercises/mlp/checks';
 import { evaluatePerceptronTasks } from '../src/features/exercises/perceptron/checks';
+import { exerciseDetail } from './fixtures/content';
 
 /**
  * The auto-checks are the only part of an exercise a learner cannot argue with, so they are
- * tested against the *shipped* configs rather than fixtures: if someone edits
- * `content/modules/01-neurons/exercises.json`, these tests are what notices.
+ * tested against the *shipped* configs rather than invented ones: if someone edits
+ * `content/modules/01-neurons/exercises.json`, these tests are what notices. Since M7 the
+ * config arrives the way the API serves it (`test/fixtures/content.ts` reads the same
+ * files and reshapes them), not through a bundler glob.
  */
 
-const perceptronConfig = parseExerciseConfig(
-  'perceptron',
-  getExercise('neurons')?.config ?? ({} as Record<string, unknown>),
-);
-const mlpConfig = parseExerciseConfig(
-  'mlp',
-  getExercise('neural-networks')?.config ?? ({} as Record<string, unknown>),
-);
+const perceptronConfig = parseExerciseConfig('perceptron', exerciseDetail('neurons').config);
+const mlpConfig = parseExerciseConfig('mlp', exerciseDetail('neural-networks').config);
 
 describe('perceptron auto-checks', () => {
   it('passes separate-blobs only at 100 % on the blobs dataset', () => {
@@ -100,7 +96,9 @@ describe('mlp auto-checks', () => {
     const measurements = { ...base, dataset: 'circle', accuracy: 0.96, hiddenSize: 3 };
     expect(evaluateMlpTasks(mlpConfig, measurements)).toContain('circle-hidden-size');
 
-    const task = mlpConfig.tasks.find((candidate) => candidate.id === 'circle-hidden-size');
+    const task = mlpConfig.tasks.find(
+      (candidate: { id: string }) => candidate.id === 'circle-hidden-size',
+    );
     expect(task).toBeDefined();
     expect(recordedValue(task!, measurements)).toBe(3);
     expect(recordedValue(task!, { ...measurements, accuracy: 0.94 })).toBeUndefined();

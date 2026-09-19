@@ -2,15 +2,9 @@ import { DATASET_KINDS, type DatasetKind } from '@lab/nn-core';
 import { useEffect, useRef, useState } from 'react';
 
 import { Button, Eyebrow, Panel, Readout, Slider } from '../../../components/ui';
+import { parseExerciseConfig } from '../../content/exerciseConfig';
+import { useExercisePersistence } from '../../content/useExercisePersistence';
 import { useAnimationLoop } from '../../../hooks/useAnimationLoop';
-import { useProgress } from '../../../hooks/useProgress';
-import {
-  exerciseKey,
-  recordExerciseTasks,
-  setExerciseState,
-  type ExerciseProgress,
-} from '../../../lib/localProgress';
-import { parseExerciseConfig } from '../../../content/static';
 import type { ExerciseComponentProps } from '../registry';
 import { TaskList, type TaskView } from '../TaskList';
 import { evaluatePerceptronTasks } from './checks';
@@ -20,11 +14,10 @@ import { usePerceptronStore } from './usePerceptronStore';
 /** Auto-run pacing. One epoch per 90 ms reads as "training" rather than as a seizure. */
 const EPOCH_INTERVAL_MS = 90;
 
-export function PerceptronExercise({ module, exercise }: ExerciseComponentProps) {
+export function PerceptronExercise({ exercise }: ExerciseComponentProps) {
   const config = parseExerciseConfig('perceptron', exercise.config);
-  const progress = useProgress();
-  const stored: ExerciseProgress | undefined =
-    progress.exercises[exerciseKey(module.slug, exercise.slug)];
+  // Task ids go to the server the moment they pass; the reflection is debounced.
+  const saved = useExercisePersistence(exercise);
 
   const state = usePerceptronStore();
   const elapsed = useRef(0);
@@ -56,12 +49,13 @@ export function PerceptronExercise({ module, exercise }: ExerciseComponentProps)
   const passingKey = passing.join(',');
   const required = exercise.completionRule.type === 'tasks' ? exercise.completionRule.required : 1;
 
+  const { reportTasks } = saved;
   useEffect(() => {
     if (passingKey === '') return;
-    recordExerciseTasks(module.slug, exercise.slug, passingKey.split(','), required);
-  }, [passingKey, module.slug, exercise.slug, required]);
+    reportTasks(passingKey.split(','));
+  }, [passingKey, reportTasks]);
 
-  const completedIds = new Set(stored?.tasksCompleted ?? []);
+  const completedIds = new Set(saved.tasksCompleted);
   const tasks: TaskView[] = config.tasks.map((task) => ({
     id: task.id,
     label: task.label,
@@ -71,7 +65,7 @@ export function PerceptronExercise({ module, exercise }: ExerciseComponentProps)
   }));
 
   const [reflection, setReflection] = useState<string>(
-    typeof stored?.state?.reflection === 'string' ? stored.state.reflection : '',
+    typeof exercise.state?.reflection === 'string' ? exercise.state.reflection : '',
   );
 
   const datasets = config.datasets.filter((kind): kind is DatasetKind =>
@@ -214,7 +208,7 @@ export function PerceptronExercise({ module, exercise }: ExerciseComponentProps)
           reflection={reflection}
           onReflectionChange={(value) => {
             setReflection(value);
-            setExerciseState(module.slug, exercise.slug, { reflection: value });
+            saved.patchState({ reflection: value });
           }}
         />
       </div>

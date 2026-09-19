@@ -8,10 +8,14 @@ import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 
+import { mfaRoutes } from './auth/mfaRoutes.js';
 import { authRoutes } from './auth/routes.js';
+import { requireFullSession } from './auth/guards.js';
 import { config as defaultConfig, type Config } from './config.js';
 import { db as defaultDb, type Db } from './db/client.js';
+import { contentRoutes } from './content/routes.js';
 import { healthRoutes, type HealthRoutesOptions } from './routes/health.js';
+import { progressRoutes } from './progress/routes.js';
 import { registerCsrfGuard } from './plugins/csrf.js';
 import { registerErrorHandler } from './plugins/error-handler.js';
 import { registerRateLimits } from './plugins/rate-limit.js';
@@ -129,6 +133,20 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   // an uptime monitor never gets a 403 or a 429 and mistakes it for an outage.
   await app.register(healthRoutes, { prefix: '/api/v1', ...opts.checks });
   await app.register(authRoutes, { prefix: '/api/v1' });
+  await app.register(mfaRoutes, { prefix: '/api/v1' });
+
+  // M7: the content + progress API. One encapsulated scope with the session guard as its
+  // `preHandler`, so every route inside it requires a logged-in, MFA-satisfied session
+  // without each handler having to remember to ask for one. `/health` is registered
+  // above, outside this scope, and stays public.
+  await app.register(
+    async (instance) => {
+      instance.addHook('preHandler', requireFullSession);
+      await instance.register(contentRoutes);
+      await instance.register(progressRoutes);
+    },
+    { prefix: '/api/v1' },
+  );
 
   const webDistPath = opts.webDistPath ?? defaultWebDistPath;
   const serveSpa = cfg.NODE_ENV === 'production' && existsSync(webDistPath);

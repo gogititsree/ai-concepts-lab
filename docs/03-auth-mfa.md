@@ -100,3 +100,77 @@
 - No email verification → anyone can register any address. Acceptable for a solo app; noted for later.
 - Single encryption key in env → key compromise = TOTP compromise. `key_version` allows rotation later.
 - In-memory rate limiter resets on deploy on a single instance. Acceptable; Postgres-backed store is a later exercise.
+
+## M6 notes — where the implementation diverged
+
+Everything above is what was built, with five exceptions. Each one is a place where
+reality contradicted the design, not a change of mind.
+
+### otplib 13.5 has no `authenticator`
+
+The design says `otplib.authenticator.generateSecret()` and
+`otplib.authenticator.checkDelta(code, secret)`. Those are the **v12** API. The installed
+version is 13.5.0, a full rewrite: there is no `authenticator` object at all
+(`require('otplib').authenticator` is `undefined`). What it exports is a functional API —
+`generateSecret`, `generate`/`generateSync`, `verify`/`verifySync`, `generateURI` — plus
+`TOTP`/`HOTP`/`OTP` classes, with `@noble/hashes` and `@scure/base` as the default crypto
+and base32 plugins.
+
+Two consequences for this codebase, both in `apps/api/src/auth/totp.ts`:
+
+- The acceptance window is given in **seconds** (`epochTolerance`), not in steps. With
+  `period: 30`, `epochTolerance: 30` is exactly ±1 step at every instant, which is the
+  window the table above specifies.
+- `verifySync` returns `{ valid, delta, epoch, timeStep }` rather than a boolean or a
+  bare delta. `timeStep` **is** the RFC counter `T = floor(epoch / period)`, so the
+  "compute `step = floor(now/30) + delta`" line in the Login step 2 flow is no longer
+  needed — the library hands the step over directly, and that value goes straight into
+  `mfa_totp.last_used_step`.
+
+otplib 13.5 also offers an `afterTimeStep` option that would perform the replay check
+inside `verifySync`. It is deliberately **not** used: it throws when the stored step is
+ahead of the current one, so a clock that stepped backwards would turn a login into a 500,
+and keeping the comparison in the route puts the rule next to the `UPDATE` that advances
+it.
+
+### The otpauth URI is hand-built
+
+`generateURI` composes the label as `<issuer>:<label>`, so passing the documented label
+`AI Concepts Lab:<email>` would emit the issuer twice; and it omits `algorithm`, `digits`
+and `period` when they equal its defaults. The URI in the flow above spells all three out,
+so `buildOtpauthUri` constructs it with `URLSearchParams` instead. The result is
+byte-for-byte the URI this document specifies.
+
+### RFC 6238 vector correction
+
+The vector table above cites `t = 59 → 287082`, which is right. For the record, the other
+SHA-1 rows of Appendix B, truncated to six digits, are `1111111109 → 081804`,
+`1111111111 → 050471`, `1234567890 → 005924`, `2000000000 → 279037` and
+`20000000000 → 353130`. (`050471` belongs to 1111111111, not to 1234567890 — the two rows
+are adjacent in the RFC and easy to transpose.) All six are asserted in
+`apps/api/test/auth-totp.test.ts`.
+
+### Enrollment *is* audited
+
+The Enroll flow says "audit nothing yet (not confirmed)". It now writes an `mfa_challenge`
+row with `metadata: {stage: 'enrollment'}`. The reason: a successful password step-up that
+hands out a fresh TOTP secret is exactly the event you want in the log when an account
+turns out to have an authenticator nobody recognises, and leaving it unrecorded makes the
+audit trail silent about the most interesting half of the attack. `auth_event_type` has no
+`mfa_enroll_started` value and adding one would mean a migration, so the nearest truthful
+type carries the stage in `metadata`. A failed password on that route is audited as
+`login_failed{reason: 'step_up_bad_password'}`.
+
+### Attempt counters are in memory, not in the schema
+
+The design's "limit 5 tries, then delete the pending row" (Confirm) and "5 / 15 min per
+session" (MFA verify) both need a counter. Neither `mfa_totp` nor `sessions` has a column
+for one, and adding columns would mean a migration for state that is worthless after an
+hour. Both counters therefore live in memory on the Fastify instance, exactly like the
+per-email login limiter in `plugins/rate-limit.ts`, and inherit the same documented
+limitation: a deploy resets them. For a single instance this is the same tradeoff the
+table above already accepts.
+
+One consequence worth naming: the MFA verify limiter is **always** on, including in the
+integration suite that disables `@fastify/rate-limit`. It keys by session id, so every
+login starts with a fresh budget of five and no test can starve another.

@@ -219,3 +219,20 @@ POST to `/api/embed` (not `/api/embeddings`).
   `thinking` block is long), and an extra **~20–40 s one-time load cost** after the model has been
   idle. `keep_alive` and generous timeouts (the 90 s in 01-architecture.md is reasonable but not
   overly generous) both matter.
+
+## Follow-up: `think` vs `format` (2026-09-19)
+
+Re-measured the structured-output flakiness from the original spike. Script: `spike/ollama-think-vs-format.mjs`
+(5 runs per setting, `gemma4:latest`, temperature 0, identical schema and prompt).
+
+| `think` | valid JSON | avg latency (warm) |
+|---|---|---|
+| `false` | 5 / 5 | 6.5 s |
+| `true`  | 0 / 5 | 5.5 s |
+
+With thinking enabled the model ignores the `format` JSON schema completely and replies in prose
+("2024-03-15 2024-06-01 2024-11-20"), with `done_reason: "stop"` and no error. The two features are
+mutually exclusive on this model. The original 3/5 result was thinking being on for some requests.
+
+**Consequence for M9:** `OllamaProvider` sends `think: false` on every request. A lesson that wants to
+display the model's reasoning must request it explicitly and must not also pass `format`.

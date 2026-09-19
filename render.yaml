@@ -47,3 +47,10 @@ services:
       # because that proxy is always in front of the container here.
       - key: TRUST_PROXY
         value: true
+      # --- MFA (M6) ---
+      # AES-256-GCM key for the TOTP secret at rest. 32 bytes, hex or base64. A secret,
+      # and a different one from SESSION_SECRET on purpose: rotating the cookie key logs
+      # everyone out, rotating this one makes every enrolled authenticator unreadable.
+      # Generate with `openssl rand -hex 32` (or `pnpm setup:env` locally).
+      - key: MFA_ENCRYPTION_KEY
+        sync: false

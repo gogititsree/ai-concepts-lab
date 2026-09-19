@@ -24,6 +24,7 @@ import {
   rateLimited,
 } from '../lib/errors.js';
 import { loginRouteRateLimit, registerRouteRateLimit } from '../plugins/rate-limit.js';
+import { countRemainingBackupCodes } from './backupCodes.js';
 import { clearSessionCookie, setSessionCookie } from './cookies.js';
 import { recordAuthEvent, requestOrigin } from './events.js';
 import { allowPendingSession, authContext, requireFullSession } from './guards.js';
@@ -275,6 +276,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           mfaVerified: session.mfaVerifiedAt !== null,
           expiresAt: session.expiresAt.toISOString(),
         },
+        // Only counted when there is something to count: for the overwhelming majority of
+        // requests (MFA off) this route stays the single session+user join it was in M5.
+        remainingBackupCodes: user.mfaEnabled
+          ? await countRemainingBackupCodes(app.db, user.id)
+          : null,
       };
     },
   );

@@ -22,11 +22,14 @@ const examplePath = resolve(repoRoot, '.env.example');
 /** Keys this script is allowed to invent a value for, and how many bytes each needs. */
 const GENERATED_KEYS = {
   // 48 bytes -> 64 base64url characters, comfortably over the 32-character minimum.
-  SESSION_SECRET: 48,
+  SESSION_SECRET: { bytes: 48, encoding: 'base64url' },
+  // Exactly 32 bytes: AES-256. Plain base64 rather than base64url because that is what
+  // `openssl rand -base64 32` and most secret managers emit, and config.ts decodes both.
+  MFA_ENCRYPTION_KEY: { bytes: 32, encoding: 'base64' },
 };
 
-function randomSecret(bytes) {
-  return randomBytes(bytes).toString('base64url');
+function randomSecret({ bytes, encoding }) {
+  return randomBytes(bytes).toString(encoding);
 }
 
 if (!existsSync(examplePath)) {
@@ -45,16 +48,16 @@ const filled = [];
 const missing = [];
 
 let contents = original;
-for (const [key, bytes] of Object.entries(GENERATED_KEYS)) {
+for (const [key, spec] of Object.entries(GENERATED_KEYS)) {
   // Matches `KEY=` with nothing (or only whitespace) after it, anywhere in the file.
   const empty = new RegExp(`^(${key}=)[ \\t]*$`, 'm');
   if (empty.test(contents)) {
-    contents = contents.replace(empty, `$1${randomSecret(bytes)}`);
+    contents = contents.replace(empty, `$1${randomSecret(spec)}`);
     filled.push(key);
   } else if (!new RegExp(`^${key}=`, 'm').test(contents)) {
     // The key is absent entirely (an older .env from before this milestone): append it
     // rather than rewriting the file, so hand-edited values and comments survive.
-    contents += `${contents.endsWith('\n') ? '' : '\n'}${key}=${randomSecret(bytes)}\n`;
+    contents += `${contents.endsWith('\n') ? '' : '\n'}${key}=${randomSecret(spec)}\n`;
     missing.push(key);
   }
 }

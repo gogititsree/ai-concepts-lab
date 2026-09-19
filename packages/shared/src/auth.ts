@@ -97,6 +97,15 @@ export const AuthErrorCodeSchema = z.enum([
   'NOT_FOUND',
   'RATE_LIMITED',
   'INTERNAL_ERROR',
+  // --- M6 ---
+  /** A TOTP or backup code that did not verify (or was a replay of one that already did). */
+  'INVALID_CODE',
+  /** Enrollment attempted on an account that already has a confirmed second factor. */
+  'MFA_ALREADY_ENABLED',
+  /** Disable/regenerate attempted on an account with no second factor. */
+  'MFA_NOT_ENABLED',
+  /** Confirm attempted with no pending enrollment (never started, expired, or burnt). */
+  'NO_PENDING_ENROLLMENT',
 ]);
 
 export type AuthErrorCode = z.infer<typeof AuthErrorCodeSchema>;
@@ -163,6 +172,12 @@ export const SessionStateSchema = z.object({
 export const MeResponseSchema = z.object({
   user: PublicUserSchema,
   session: SessionStateSchema,
+  /**
+   * Unused backup codes left, or `null` when MFA is off. Lives on `/auth/me` rather than
+   * on a dedicated endpoint so the "you have 1 backup code left" banner costs no extra
+   * round trip; the count is only queried when `user.mfaEnabled` is set.
+   */
+  remainingBackupCodes: z.number().int().min(0).nullable().default(null),
 });
 
 export type SessionState = z.infer<typeof SessionStateSchema>;
@@ -224,3 +239,140 @@ export const SessionIdParamSchema = z.object({
 export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 export type SessionListResponse = z.infer<typeof SessionListResponseSchema>;
 export type SessionIdParam = z.infer<typeof SessionIdParamSchema>;
+
+// ------------------------------------------------------------------- MFA (M6) ----
+
+/**
+ * TOTP parameters, per `docs/03-auth-mfa.md`. They are here rather than in the API
+ * because the enrollment UI prints them next to the manual-entry secret, and a value that
+ * is displayed in one place and enforced in another is a value that will drift.
+ */
+export const TOTP_DIGITS = 6;
+export const TOTP_PERIOD_SECONDS = 30;
+export const TOTP_ALGORITHM = 'SHA1';
+/** ±1 step of tolerance: one period of clock skew or typing delay either way. */
+export const TOTP_WINDOW_STEPS = 1;
+/** The `issuer` in the otpauth URI and the prefix of its label. */
+export const TOTP_ISSUER = 'AI Concepts Lab';
+
+/** How many single-use backup codes an enrollment (or a regeneration) mints. */
+export const BACKUP_CODE_COUNT = 10;
+/** At or below this many codes left, the UI nags. */
+export const BACKUP_CODE_LOW_WATERMARK = 2;
+
+/** A six-digit TOTP as typed by a human; spaces are stripped before this is applied. */
+export const TotpCodeSchema = z.string().regex(/^\d{6}$/, 'Must be a 6-digit code');
+
+/**
+ * `xxxxx-xxxxx` in lowercase Crockford base32 (no `i`, `l`, `o`, `u`). The schema is
+ * deliberately strict — `normaliseMfaCode` below is what turns human input into this
+ * shape, so the wire format stays one thing.
+ */
+export const BACKUP_CODE_PATTERN = /^[0-9a-hjkmnp-tv-z]{5}-[0-9a-hjkmnp-tv-z]{5}$/;
+export const BackupCodeSchema = z
+  .string()
+  .regex(BACKUP_CODE_PATTERN, 'Must be a backup code in the form xxxxx-xxxxx');
+
+/**
+ * Canonicalises whatever the user typed into either a 6-digit TOTP or a backup code.
+ *
+ * Shared with the browser so the MFA form can tell the two apart *before* it posts (to
+ * label the field and to disable the button), using exactly the rules the server applies.
+ * Crockford's letter aliases are folded here — `O`→`0`, `I`/`L`→`1` — because those are
+ * the characters people actually mistype off a printed sheet.
+ */
+export function normaliseMfaCode(input: string): string {
+  const stripped = input.replace(/[\s_]+/g, '').toLowerCase();
+  if (/^\d{6}$/.test(stripped)) return stripped;
+
+  const folded = stripped
+    .replace(/-/g, '')
+    .replace(/o/g, '0')
+    .replace(/[il]/g, '1')
+    .replace(/u/g, 'v');
+  if (/^[0-9a-hjkmnp-tv-z]{10}$/.test(folded)) {
+    return `${folded.slice(0, 5)}-${folded.slice(5)}`;
+  }
+  return stripped;
+}
+
+export type MfaCodeKind = 'totp' | 'backup' | 'unknown';
+
+export function classifyMfaCode(input: string): MfaCodeKind {
+  const code = normaliseMfaCode(input);
+  if (/^\d{6}$/.test(code)) return 'totp';
+  if (BACKUP_CODE_PATTERN.test(code)) return 'backup';
+  return 'unknown';
+}
+
+// -- enroll --
+
+/** Step-up: a valid session is not enough to bolt a second factor onto an account. */
+export const MfaEnrollRequestSchema = z.object({
+  password: z.string().min(1).max(PASSWORD_MAX),
+});
+
+export const MfaEnrollResponseSchema = z.object({
+  /** `otpauth://totp/...` — what the QR encodes. */
+  otpauthUri: z.string(),
+  /** Server-rendered `<svg>` markup for that URI. */
+  qrSvg: z.string(),
+  /**
+   * The base32 secret, for typing into an app that cannot scan. Returned **only** by this
+   * route and never again: after confirmation the only copy is encrypted in the database.
+   */
+  secretForManualEntry: z.string(),
+});
+
+export type MfaEnrollRequest = z.infer<typeof MfaEnrollRequestSchema>;
+export type MfaEnrollResponse = z.infer<typeof MfaEnrollResponseSchema>;
+
+// -- confirm --
+
+export const MfaConfirmRequestSchema = z.object({ code: TotpCodeSchema });
+
+/**
+ * The plaintext backup codes, shown exactly once. The UI makes the user acknowledge that
+ * they have saved them before it will move on, because there is no second chance.
+ */
+export const BackupCodesResponseSchema = z.object({
+  backupCodes: z.array(z.string()).length(BACKUP_CODE_COUNT),
+});
+
+export type MfaConfirmRequest = z.infer<typeof MfaConfirmRequestSchema>;
+export type BackupCodesResponse = z.infer<typeof BackupCodesResponseSchema>;
+
+// -- verify (login step 2) --
+
+/**
+ * One field for both factors. Which one it is, is a property of the string, not of a
+ * radio button the user has to get right while locked out of their account.
+ */
+export const MfaVerifyRequestSchema = z.object({
+  code: z.string().trim().min(1).max(32),
+});
+
+export const MfaVerifyResponseSchema = z.object({
+  status: z.literal('ok'),
+  user: PublicUserSchema,
+  /** Present and true when a backup code was spent rather than a TOTP. */
+  usedBackupCode: z.boolean().optional(),
+  /** How many unused backup codes are left; drives the "you are running out" nag. */
+  remainingBackupCodes: z.number().int().min(0).optional(),
+});
+
+export type MfaVerifyRequest = z.infer<typeof MfaVerifyRequestSchema>;
+export type MfaVerifyResponse = z.infer<typeof MfaVerifyResponseSchema>;
+
+// -- regenerate / disable --
+
+/**
+ * Both routes need the password *and* a current second factor: whoever is turning MFA off
+ * or invalidating the recovery codes must be holding the phone, not just the cookie.
+ */
+export const MfaStepUpRequestSchema = z.object({
+  password: z.string().min(1).max(PASSWORD_MAX),
+  code: z.string().trim().min(1).max(32),
+});
+
+export type MfaStepUpRequest = z.infer<typeof MfaStepUpRequestSchema>;

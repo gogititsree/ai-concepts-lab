@@ -3,25 +3,52 @@ import { Link, useParams } from 'react-router';
 
 import { Markdown } from '../components/Markdown';
 import { Button, Eyebrow } from '../components/ui';
-import { getLesson } from '../content/static';
-import { useProgress } from '../hooks/useProgress';
-import { lessonKey, setLessonStatus } from '../lib/localProgress';
+import { queryFallback } from '../features/content/QueryStates';
+import { useLesson, useModule, useSetLessonStatus } from '../features/content/queries';
+import { ApiError } from '../lib/apiClient';
 import { NotFound } from './NotFound';
 
+/**
+ * A lesson. Two requests, not one: the module gives the lesson's id (the router only
+ * knows slugs) and the prev/next chain, and `GET /lessons/:id` gives the Markdown body.
+ * Both are cached, so walking a module fetches each module once and each body once.
+ */
 export function LessonPage() {
   const { slug = '', lessonSlug = '' } = useParams();
-  const found = getLesson(slug, lessonSlug);
-  const progress = useProgress();
+  const moduleQuery = useModule(slug);
+  const setStatus = useSetLessonStatus();
 
-  // A new lesson starts at the top and starts at the top of the page.
+  const lessons = moduleQuery.data?.lessons ?? [];
+  const index = lessons.findIndex((entry) => entry.slug === lessonSlug);
+  const summary = index === -1 ? undefined : lessons[index];
+  const lessonQuery = useLesson(summary?.id);
+
+  // A new lesson starts at the top of the page.
   useEffect(() => {
     window.scrollTo?.(0, 0);
   }, [slug, lessonSlug]);
 
-  if (!found) return <NotFound what={`Lesson "${lessonSlug}"`} />;
-  const { module, lesson, previous, next } = found;
-  const status = progress.lessons[lessonKey(module.slug, lesson.slug)]?.status ?? 'not_started';
-  const isComplete = status === 'completed';
+  if (moduleQuery.error instanceof ApiError && moduleQuery.error.status === 404) {
+    return <NotFound what={`Module "${slug}"`} />;
+  }
+  const moduleFallback = queryFallback(moduleQuery, {
+    label: 'Loading the lesson…',
+    signInFor: 'read the lessons',
+  });
+  if (moduleFallback) return <div className="mx-auto max-w-2xl">{moduleFallback}</div>;
+  if (!moduleQuery.data) return null;
+  if (index === -1) return <NotFound what={`Lesson "${lessonSlug}"`} />;
+
+  const lessonFallback = queryFallback(lessonQuery, {
+    label: 'Loading the lesson…',
+    signInFor: 'read the lessons',
+  });
+
+  const module = moduleQuery.data.module;
+  const previous = lessons[index - 1];
+  const next = lessons[index + 1];
+  const lesson = lessonQuery.data;
+  const isComplete = (lesson?.status ?? summary?.status) === 'completed';
 
   return (
     <article className="mx-auto max-w-2xl">
@@ -33,31 +60,43 @@ export function LessonPage() {
           /
         </span>
         <Eyebrow>
-          Lesson {module.orderIndex}.{lesson.orderIndex} &middot; {lesson.estimatedMinutes} min
+          Lesson {module.orderIndex}.{summary?.orderIndex ?? index + 1} &middot;{' '}
+          {summary?.estimatedMinutes ?? 0} min
         </Eyebrow>
       </nav>
 
-      <Markdown className="mt-6">{lesson.bodyMd}</Markdown>
+      {lessonFallback ?? <Markdown className="mt-6">{lesson?.bodyMd ?? ''}</Markdown>}
 
-      <div className="border-rule mt-10 flex flex-wrap items-center gap-3 border-t pt-6">
-        <Button
-          variant={isComplete ? 'secondary' : 'primary'}
-          aria-pressed={isComplete}
-          onClick={() =>
-            setLessonStatus(module.slug, lesson.slug, isComplete ? 'in_progress' : 'completed')
-          }
-        >
-          {isComplete ? 'Completed -- undo' : 'Mark complete'}
-        </Button>
-        {module.exercises[0] && (
-          <Link
-            to={`/modules/${module.slug}/exercise`}
-            className="readout text-muted hover:text-ink px-2 py-1.5 text-xs"
+      {lesson && (
+        <div className="border-rule mt-10 flex flex-wrap items-center gap-3 border-t pt-6">
+          <Button
+            variant={isComplete ? 'secondary' : 'primary'}
+            aria-pressed={isComplete}
+            disabled={setStatus.isPending}
+            onClick={() =>
+              setStatus.mutate({
+                lessonId: lesson.id,
+                status: isComplete ? 'in_progress' : 'completed',
+              })
+            }
           >
-            Open the exercise
-          </Link>
-        )}
-      </div>
+            {isComplete ? 'Completed -- undo' : 'Mark complete'}
+          </Button>
+          {moduleQuery.data.exercises[0] && (
+            <Link
+              to={`/modules/${module.slug}/exercise`}
+              className="readout text-muted hover:text-ink px-2 py-1.5 text-xs"
+            >
+              Open the exercise
+            </Link>
+          )}
+          {setStatus.error && (
+            <span className="readout text-xs" role="alert">
+              Could not save: {setStatus.error.message}
+            </span>
+          )}
+        </div>
+      )}
 
       <nav className="mt-6 grid gap-3 sm:grid-cols-2" aria-label="Lesson navigation">
         {previous ? (

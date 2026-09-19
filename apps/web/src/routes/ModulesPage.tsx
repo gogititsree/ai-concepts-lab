@@ -1,16 +1,23 @@
 import { Link } from 'react-router';
 
 import { Eyebrow, Panel, ProgressRing } from '../components/ui';
-import { modules } from '../content/static';
-import { useProgress } from '../hooks/useProgress';
-import { summariseModule } from '../lib/localProgress';
+import { queryFallback } from '../features/content/QueryStates';
+import { useModules } from '../features/content/queries';
 
 /**
- * The curriculum index. Six cards in reading order, because the course is a sequence and the
- * order carries information: a perceptron before a network before a language model.
+ * The curriculum index, now from `GET /modules`. Six cards in reading order, because the
+ * course is a sequence and the order carries information: a perceptron before a network
+ * before a language model.
+ *
+ * The listing carries the caller's progress, so it needs a session — a signed-out visitor
+ * gets the "sign in" panel in place rather than a redirect (see `QueryStates.tsx`).
  */
 export function ModulesPage() {
-  const progress = useProgress();
+  const modules = useModules();
+  const fallback = queryFallback(modules, {
+    label: 'Loading the curriculum…',
+    signInFor: 'see the curriculum',
+  });
 
   return (
     <div>
@@ -26,10 +33,11 @@ export function ModulesPage() {
         </p>
       </header>
 
-      <ul className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {modules.map((module) => {
-          const summary = summariseModule(progress, module);
-          return (
+      {fallback ? (
+        <div className="mt-8">{fallback}</div>
+      ) : (
+        <ul className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {modules.data?.modules.map((module) => (
             <li key={module.slug}>
               <Panel className="hover:border-ink/40 h-full transition-colors">
                 <Link
@@ -39,7 +47,7 @@ export function ModulesPage() {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <Eyebrow>Module {module.orderIndex}</Eyebrow>
-                    <ProgressRing fraction={summary.fraction} />
+                    <ProgressRing fraction={module.progress.fraction} />
                   </div>
                   <h2 className="text-lg leading-snug font-semibold tracking-tight">
                     {module.title}
@@ -47,12 +55,12 @@ export function ModulesPage() {
                   <p className="text-muted flex-1 text-sm leading-6">{module.summary}</p>
                   <p className="readout text-muted flex flex-wrap items-center gap-x-3 text-xs">
                     <span>
-                      {summary.lessonsCompleted}/{summary.lessonCount} lessons
+                      {module.progress.lessonsDone}/{module.progress.lessonsTotal} lessons
                     </span>
                     <span aria-hidden="true">&middot;</span>
-                    <span>{module.exercises.length} exercise</span>
+                    <span>{module.counts.exercises} exercise</span>
                     <span aria-hidden="true">&middot;</span>
-                    <span>{module.quiz.questions.length} questions</span>
+                    <span>{module.counts.quizQuestions} questions</span>
                     {module.requiresModel && (
                       <span className="border-rule text-muted rounded border px-1.5 py-0.5">
                         needs local model
@@ -62,9 +70,9 @@ export function ModulesPage() {
                 </Link>
               </Panel>
             </li>
-          );
-        })}
-      </ul>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

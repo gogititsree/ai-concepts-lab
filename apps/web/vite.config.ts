@@ -5,8 +5,6 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
-const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -18,11 +16,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // The lesson Markdown lives in `content/` at the repo root, outside this Vite root, and
-    // `src/content/static.ts` reads it with `import.meta.glob(..., '?raw')`. The dev server
-    // refuses to serve files outside the root unless they are allow-listed. (M7 deletes the
-    // static loader and this line with it.)
-    fs: { allow: [repoRoot] },
+    // No `fs.allow` entry for the repo root any more: M7 deleted `src/content/static.ts`
+    // and its `import.meta.glob('../../../../content/**')`, so nothing outside this Vite
+    // root is read at build time. The curriculum comes from the API.
     // Same origin in dev, exactly as in production where the API serves this bundle.
     proxy: {
       '/api': { target: 'http://localhost:3000', changeOrigin: true },

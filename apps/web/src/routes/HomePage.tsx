@@ -1,47 +1,37 @@
 import type { HealthResponse } from '@lab/shared';
-import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
 
 import { Eyebrow, Panel, ProgressRing } from '../components/ui';
-import { modules } from '../content/static';
-import { useProgress } from '../hooks/useProgress';
+import {
+  ErrorPanel,
+  LoadingPanel,
+  SignInPanel,
+  isUnauthenticated,
+} from '../features/content/QueryStates';
+import { useProgress } from '../features/content/queries';
 import { fetchHealth } from '../lib/api';
-import { summariseModule } from '../lib/localProgress';
-
-type HealthState =
-  | { kind: 'loading' }
-  | { kind: 'ready'; health: HealthResponse }
-  | { kind: 'error'; message: string };
+import { queryKeys } from '../lib/queryClient';
 
 /**
  * The dashboard: where you are in the course, and whether the machinery behind it is up.
  *
- * The API is not required for anything on this page -- Modules 1 and 2 are static content plus
- * `@lab/nn-core` in the browser -- so a failed health check is reported as a fact and nothing
- * else changes. That property is load-bearing: `pnpm --filter web dev` with no API running has
- * to be a working app, not a spinner.
+ * Progress comes from `GET /progress` (M7), which means this page needs a session for
+ * the rings — but not for anything else. A signed-out visitor still gets the pitch, the
+ * curriculum link and the health tile, with one panel inviting them in. Degrading to
+ * *less* rather than to a redirect is the same choice the module pages make.
  */
 export function HomePage() {
-  const [health, setHealth] = useState<HealthState>({ kind: 'loading' });
   const progress = useProgress();
+  const health = useQuery<HealthResponse>({
+    queryKey: queryKeys.health,
+    queryFn: ({ signal }) => fetchHealth(signal),
+  });
 
-  // TanStack Query arrives in M7; a bare effect is enough for one call.
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchHealth(controller.signal)
-      .then((response) => setHealth({ kind: 'ready', health: response }))
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        setHealth({
-          kind: 'error',
-          message: error instanceof Error ? error.message : 'Unknown error',
-        });
-      });
-    return () => controller.abort();
-  }, []);
-
-  const started = modules.filter((module) => summariseModule(progress, module).fraction > 0);
-  const next = modules.find((module) => summariseModule(progress, module).fraction < 1);
+  const modules = progress.data?.modules ?? [];
+  const started = modules.filter((entry) => entry.progress.fraction > 0);
+  const next = progress.data?.nextModuleSlug ?? null;
+  const nextTitle = modules.find((entry) => entry.moduleSlug === next)?.moduleTitle;
 
   return (
     <div className="space-y-8">
@@ -67,10 +57,11 @@ export function HomePage() {
           </Link>
           {next && (
             <Link
-              to={`/modules/${next.slug}`}
+              to={`/modules/${next}`}
+              data-testid="continue-link"
               className="readout border-rule bg-surface hover:bg-sunk inline-flex rounded-md border px-3 py-2 text-xs font-medium"
             >
-              {started.length === 0 ? 'Start Module 1' : `Continue: ${next.title}`}
+              {started.length === 0 ? 'Start Module 1' : `Continue: ${nextTitle ?? next}`}
             </Link>
           )}
         </div>
@@ -78,57 +69,71 @@ export function HomePage() {
 
       <section>
         <Eyebrow>Progress</Eyebrow>
-        <ul className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {modules.map((module) => {
-            const summary = summariseModule(progress, module);
-            return (
-              <li key={module.slug}>
+        {progress.isPending && <LoadingPanel label="Loading your progress…" />}
+        {progress.error && isUnauthenticated(progress.error) && (
+          <SignInPanel className="mt-3" what="see your progress" />
+        )}
+        {progress.error && !isUnauthenticated(progress.error) && (
+          <ErrorPanel
+            className="mt-3"
+            error={progress.error}
+            onRetry={() => {
+              void progress.refetch();
+            }}
+          />
+        )}
+        {progress.data && (
+          <ul className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {modules.map((entry) => (
+              <li key={entry.moduleSlug}>
                 <Panel className="hover:border-ink/40 transition-colors">
                   <Link
-                    to={`/modules/${module.slug}`}
+                    to={`/modules/${entry.moduleSlug}`}
                     className="flex items-center gap-3 p-4"
                     data-testid="dashboard-module"
                   >
-                    <ProgressRing fraction={summary.fraction} />
+                    <ProgressRing fraction={entry.progress.fraction} />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{module.title}</span>
+                      <span className="block truncate text-sm font-medium">
+                        {entry.moduleTitle}
+                      </span>
                       <span className="readout text-muted block text-xs">
-                        {summary.lessonsCompleted}/{summary.lessonCount} lessons
-                        {summary.quiz?.passed ? ' · quiz passed' : ''}
+                        {entry.progress.lessonsDone}/{entry.progress.lessonsTotal} lessons
+                        {entry.progress.quizPassed ? ' · quiz passed' : ''}
                       </span>
                     </span>
                   </Link>
                 </Panel>
               </li>
-            );
-          })}
-        </ul>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section>
         <Eyebrow>Backend</Eyebrow>
         <Panel className="mt-3 p-4">
-          {health.kind === 'loading' && <p className="readout text-muted text-sm">Checking...</p>}
-          {health.kind === 'error' && (
+          {health.isPending && <p className="readout text-muted text-sm">Checking...</p>}
+          {health.error && (
             <div className="text-sm">
               <p className="readout">
-                API unreachable <span className="text-muted">({health.message})</span>
+                API unreachable <span className="text-muted">({health.error.message})</span>
               </p>
               <p className="text-muted mt-1 text-xs leading-5">
-                Nothing on this page needs it yet: lessons and both playgrounds run entirely in the
-                browser. Start it with <code>pnpm --filter api dev</code>.
+                The curriculum now comes from the API, so nothing on this site works without it.
+                Start it with <code>pnpm --filter api dev</code>.
               </p>
             </div>
           )}
-          {health.kind === 'ready' && (
+          {health.data && (
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
               <dt className="text-muted">status</dt>
               <dd data-testid="health-status" className="readout">
-                {health.health.status}
+                {health.data.status}
               </dd>
               <dt className="text-muted">version</dt>
               <dd data-testid="health-version" className="readout">
-                {health.health.version}
+                {health.data.version}
               </dd>
             </dl>
           )}

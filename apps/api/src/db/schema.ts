@@ -500,11 +500,20 @@ export const agentRunSteps = pgTable(
  * The CROSS JOIN means every user has a row for every module, including modules they
  * have never opened (all counters zero), which is exactly what the modules list needs.
  *
- * Defined with raw SQL because the GROUP BY + FILTER + bool_or shape is not expressible
- * through the query builder in a way that round-trips. drizzle-kit **does** emit it into
- * the generated migration (`CREATE VIEW "v_user_module_progress" AS (...)`), so no
- * hand-editing was needed for the view itself — only for the two extensions, which
- * drizzle-kit has no concept of.
+ * Defined with raw SQL because the shape is not expressible through the query builder in
+ * a way that round-trips. drizzle-kit **does** emit it into the generated migration
+ * (`CREATE VIEW "v_user_module_progress" AS (...)`), so no hand-editing was needed for
+ * the view itself — only for the two extensions, which drizzle-kit has no concept of.
+ *
+ * **Why lateral subqueries and not the one flat GROUP BY in docs/02-schema.md** (see
+ * `docs/adr/0001-fix-v-user-module-progress-fan-out.md`): joining lessons, exercises and
+ * quiz_attempts in a single FROM multiplies the rows, so `count(l.id)` returned
+ * lessons × attempts. A learner with three lessons and two quiz attempts was reported as
+ * having "6 of 6 lessons". Each fact is now aggregated over its own rows.
+ *
+ * What deliberately did *not* change: `bool_or` over zero rows is still SQL NULL, so an
+ * untouched module still reports `exercise_done = NULL`. Coalescing is the API's job
+ * (`content/repository.ts`), which keeps the view a faithful report of what is known.
  */
 export const vUserModuleProgress = pgView('v_user_module_progress', {
   userId: uuid('user_id').notNull(),
@@ -516,18 +525,24 @@ export const vUserModuleProgress = pgView('v_user_module_progress', {
   moduleCompleted: boolean('module_completed'),
 }).as(
   sql`SELECT u.id AS user_id, m.id AS module_id,
-       count(l.id) AS lessons_total,
-       count(ulp.lesson_id) FILTER (WHERE ulp.status = 'completed') AS lessons_done,
-       bool_or(uep.status = 'completed') AS exercise_done,
-       bool_or(qa.passed) AS quiz_passed,
-       (count(l.id) = count(ulp.lesson_id) FILTER (WHERE ulp.status = 'completed')
-        AND bool_or(uep.status = 'completed') AND bool_or(qa.passed)) AS module_completed
-FROM users u CROSS JOIN modules m
-LEFT JOIN lessons l ON l.module_id = m.id
-LEFT JOIN user_lesson_progress ulp ON ulp.lesson_id = l.id AND ulp.user_id = u.id
-LEFT JOIN exercises e ON e.module_id = m.id
-LEFT JOIN user_exercise_progress uep ON uep.exercise_id = e.id AND uep.user_id = u.id
-LEFT JOIN quizzes q ON q.module_id = m.id
-LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id AND qa.user_id = u.id
-GROUP BY u.id, m.id`,
+       agg.lessons_total,
+       agg.lessons_done,
+       agg.exercise_done,
+       agg.quiz_passed,
+       (agg.lessons_total = agg.lessons_done AND agg.exercise_done AND agg.quiz_passed) AS module_completed
+FROM users u
+CROSS JOIN modules m
+CROSS JOIN LATERAL (
+  SELECT
+    (SELECT count(*) FROM lessons l WHERE l.module_id = m.id) AS lessons_total,
+    (SELECT count(*) FROM lessons l
+       JOIN user_lesson_progress ulp ON ulp.lesson_id = l.id AND ulp.user_id = u.id
+      WHERE l.module_id = m.id AND ulp.status = 'completed') AS lessons_done,
+    (SELECT bool_or(uep.status = 'completed') FROM exercises e
+       JOIN user_exercise_progress uep ON uep.exercise_id = e.id AND uep.user_id = u.id
+      WHERE e.module_id = m.id) AS exercise_done,
+    (SELECT bool_or(qa.passed) FROM quizzes q
+       JOIN quiz_attempts qa ON qa.quiz_id = q.id AND qa.user_id = u.id
+      WHERE q.module_id = m.id) AS quiz_passed
+) agg`,
 );

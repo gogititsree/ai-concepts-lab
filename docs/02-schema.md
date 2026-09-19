@@ -188,22 +188,41 @@ Index `(user_id, created_at DESC)`, `(event_type, created_at DESC)` for lockout/
 Computed, not stored, until it is measurably slow (it won't be for one user):
 ```sql
 SELECT u.id AS user_id, m.id AS module_id,
-       count(l.id)                                        AS lessons_total,
-       count(ulp.lesson_id) FILTER (WHERE ulp.status='completed') AS lessons_done,
-       bool_or(uep.status='completed')                    AS exercise_done,
-       bool_or(qa.passed)                                 AS quiz_passed,
-       (count(l.id)=count(ulp.lesson_id) FILTER (WHERE ulp.status='completed')
-        AND bool_or(uep.status='completed') AND bool_or(qa.passed)) AS module_completed
-FROM users u CROSS JOIN modules m
-LEFT JOIN lessons l                ON l.module_id=m.id
-LEFT JOIN user_lesson_progress ulp ON ulp.lesson_id=l.id AND ulp.user_id=u.id
-LEFT JOIN exercises e              ON e.module_id=m.id
-LEFT JOIN user_exercise_progress uep ON uep.exercise_id=e.id AND uep.user_id=u.id
-LEFT JOIN quizzes q                ON q.module_id=m.id
-LEFT JOIN quiz_attempts qa         ON qa.quiz_id=q.id AND qa.user_id=u.id
-GROUP BY u.id, m.id;
+       agg.lessons_total,
+       agg.lessons_done,
+       agg.exercise_done,
+       agg.quiz_passed,
+       (agg.lessons_total = agg.lessons_done AND agg.exercise_done AND agg.quiz_passed)
+         AS module_completed
+FROM users u
+CROSS JOIN modules m
+CROSS JOIN LATERAL (
+  SELECT
+    (SELECT count(*) FROM lessons l WHERE l.module_id = m.id) AS lessons_total,
+    (SELECT count(*) FROM lessons l
+       JOIN user_lesson_progress ulp ON ulp.lesson_id = l.id AND ulp.user_id = u.id
+      WHERE l.module_id = m.id AND ulp.status = 'completed') AS lessons_done,
+    (SELECT bool_or(uep.status = 'completed') FROM exercises e
+       JOIN user_exercise_progress uep ON uep.exercise_id = e.id AND uep.user_id = u.id
+      WHERE e.module_id = m.id) AS exercise_done,
+    (SELECT bool_or(qa.passed) FROM quizzes q
+       JOIN quiz_attempts qa ON qa.quiz_id = q.id AND qa.user_id = u.id
+      WHERE q.module_id = m.id) AS quiz_passed
+) agg;
 ```
-(Roadmap milestone: measure it with `EXPLAIN ANALYZE`, then decide whether to materialise. That is a real DB-design lesson.)
+**Why lateral subqueries rather than one flat `GROUP BY` with three LEFT JOINs** (which is
+what this document specified until M7): lessons, exercise progress and quiz attempts are
+three independent one-to-many relationships off the same row, so joining them all in one
+FROM multiplies them together. With three lessons and two quiz attempts, `count(l.id)`
+returned 6. See `docs/adr/0001-fix-v-user-module-progress-fan-out.md`.
+
+**NULLs are deliberate.** `bool_or` over zero rows is SQL NULL, so a module the learner
+has never opened reports `exercise_done = NULL` (not `false`), and `module_completed` is
+NULL with it. The API coalesces to `false` when it serialises
+(`apps/api/src/content/repository.ts`); the view stays a faithful report of what is known.
+
+(Roadmap milestone: measure it with `EXPLAIN ANALYZE`, then decide whether to materialise.
+That is a real DB-design lesson.)
 
 ## Agent / model observability
 

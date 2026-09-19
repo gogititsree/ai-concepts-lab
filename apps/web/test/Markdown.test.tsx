@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { Markdown } from '../src/components/Markdown';
-import { getLesson } from '../src/content/static';
+import { lessonDetail } from './fixtures/content';
 
 describe('Markdown renderer', () => {
   it('typesets inline and display maths with KaTeX', () => {
@@ -23,7 +23,7 @@ describe('Markdown renderer', () => {
   });
 
   it('renders a real lesson, maths and callout included', () => {
-    const lesson = getLesson('neural-networks', 'the-forward-pass')!.lesson;
+    const lesson = lessonDetail('neural-networks', 'the-forward-pass');
     const { container } = render(<Markdown>{lesson.bodyMd}</Markdown>);
 
     expect(

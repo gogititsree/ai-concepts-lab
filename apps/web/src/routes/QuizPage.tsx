@@ -1,49 +1,83 @@
+import type { QuizAnswer, QuizAttemptResult } from '@lab/shared';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 
 import { InlineMarkdown, Markdown } from '../components/Markdown';
 import { Button, Eyebrow, Panel } from '../components/ui';
-import { getModule } from '../content/static';
-import { recordQuizAttempt } from '../lib/localProgress';
-import { gradeQuiz, type GradedQuiz, type QuizAnswer } from '../lib/quizGrading';
+import { queryFallback } from '../features/content/QueryStates';
+import {
+  useModule,
+  useQuiz,
+  useQuizAttempts,
+  useSubmitQuizAttempt,
+} from '../features/content/queries';
+import { ApiError } from '../lib/apiClient';
+import { describeCorrect, formatPercent, isAnswered, selectedOptionIds } from '../lib/quizGrading';
 import { NotFound } from './NotFound';
 
 /**
- * TODO(M7): the quiz is graded here, in the browser, against answers that ship in the bundle.
- * `POST /quizzes/:id/attempts` takes this over and `GET /quizzes/:id` stops serving `correct`
- * at all. The grading rules live in `lib/quizGrading.ts` precisely so the server can be diffed
- * against them.
+ * The quiz, graded by the server.
+ *
+ * `GET /quizzes/:id` gives prompts, options and points — and nothing else; the answers
+ * and the explanations only exist in the response to `POST /quizzes/:id/attempts`. So
+ * this page has no notion of a right answer until it has submitted one, which is exactly
+ * the property the "never leak `correct`" rule is protecting.
  */
 export function QuizPage() {
   const { slug = '' } = useParams();
-  const module = getModule(slug);
-  const [answers, setAnswers] = useState<(QuizAnswer | undefined)[]>([]);
-  const [result, setResult] = useState<GradedQuiz | null>(null);
+  const moduleQuery = useModule(slug);
+  const quizId = moduleQuery.data?.quiz?.id;
+  const quizQuery = useQuiz(quizId);
+  const attemptsQuery = useQuizAttempts(quizId);
+  const submit = useSubmitQuizAttempt();
 
-  if (!module) return <NotFound what={`Module "${slug}"`} />;
-  const quiz = module.quiz;
+  const [answers, setAnswers] = useState<Record<string, QuizAnswer>>({});
+  const [result, setResult] = useState<QuizAttemptResult | null>(null);
 
-  const setAnswer = (index: number, answer: QuizAnswer): void => {
-    setAnswers((current) => {
-      const next = [...current];
-      next[index] = answer;
-      return next;
-    });
+  if (moduleQuery.error instanceof ApiError && moduleQuery.error.status === 404) {
+    return <NotFound what={`Module "${slug}"`} />;
+  }
+  const moduleFallback = queryFallback(moduleQuery, {
+    label: 'Loading the quiz…',
+    signInFor: 'take the quiz',
+  });
+  if (moduleFallback) return <div className="mx-auto max-w-2xl">{moduleFallback}</div>;
+  if (!moduleQuery.data) return null;
+  if (!quizId) return <NotFound what={`A quiz for "${slug}"`} />;
+
+  const quizFallback = queryFallback(quizQuery, {
+    label: 'Loading the quiz…',
+    signInFor: 'take the quiz',
+  });
+  if (quizFallback) return <div className="mx-auto max-w-2xl">{quizFallback}</div>;
+  if (!quizQuery.data) return null;
+
+  const quiz = quizQuery.data;
+  const module = moduleQuery.data.module;
+  const gradedById = new Map((result?.questions ?? []).map((q) => [q.questionId, q]));
+  const answeredCount = quiz.questions.filter((q) => isAnswered(answers[q.id])).length;
+  const history = attemptsQuery.data?.attempts ?? [];
+
+  const setAnswer = (questionId: string, answer: QuizAnswer): void => {
+    setAnswers((current) => ({ ...current, [questionId]: answer }));
   };
 
-  const submit = (): void => {
-    const graded = gradeQuiz(quiz, answers);
-    setResult(graded);
-    recordQuizAttempt(module.slug, {
-      scorePoints: graded.scorePoints,
-      maxPoints: graded.maxPoints,
-      passed: graded.passed,
-      submittedAt: new Date().toISOString(),
-    });
-    window.scrollTo?.(0, 0);
+  const onSubmit = (): void => {
+    submit.mutate(
+      {
+        quizId,
+        answers: quiz.questions
+          .filter((question) => isAnswered(answers[question.id]))
+          .map((question) => ({ questionId: question.id, answer: answers[question.id]! })),
+      },
+      {
+        onSuccess: (graded) => {
+          setResult(graded);
+          window.scrollTo?.(0, 0);
+        },
+      },
+    );
   };
-
-  const answeredCount = quiz.questions.filter((_, index) => answers[index] !== undefined).length;
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -52,7 +86,7 @@ export function QuizPage() {
       </Link>
       <h1 className="mt-3 text-3xl font-semibold tracking-tight text-balance">{quiz.title}</h1>
       <p className="text-muted mt-2 text-sm">
-        {quiz.questions.length} questions &middot; {Math.round(quiz.passThreshold * 100)} % to pass.
+        {quiz.questions.length} questions &middot; {formatPercent(quiz.passThreshold)} to pass.
       </p>
 
       {result && (
@@ -63,15 +97,13 @@ export function QuizPage() {
           <Eyebrow>{result.passed ? 'Passed' : 'Not passed'}</Eyebrow>
           <p className="readout mt-1 text-2xl font-semibold">
             {result.scorePoints}/{result.maxPoints}
-            <span className="text-muted ml-2 text-base">
-              ({Math.round(result.fraction * 100)} %)
-            </span>
+            <span className="text-muted ml-2 text-base">({formatPercent(result.fraction)})</span>
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             <Button
               onClick={() => {
                 setResult(null);
-                setAnswers([]);
+                setAnswers({});
               }}
             >
               Try again
@@ -86,14 +118,30 @@ export function QuizPage() {
         </Panel>
       )}
 
+      {submit.error && (
+        <Panel className="mt-6 p-4" role="alert">
+          <p className="text-sm">
+            Could not submit the quiz: {submit.error.message}
+            {submit.error instanceof ApiError && submit.error.isUnauthenticated && (
+              <>
+                {' '}
+                <Link to="/login" className="underline">
+                  Sign in
+                </Link>{' '}
+                and try again.
+              </>
+            )}
+          </p>
+        </Panel>
+      )}
+
       <ol className="mt-6 space-y-4">
         {quiz.questions.map((question, index) => {
-          const graded = result?.perQuestion[index];
-          const answer = answers[index];
-          const selected = answer?.kind === 'choice' ? answer.optionIds : [];
+          const graded = gradedById.get(question.id);
+          const selected = selectedOptionIds(answers[question.id]);
 
           return (
-            <li key={index}>
+            <li key={question.id}>
               <Panel
                 className={`p-5 ${graded ? (graded.isCorrect ? 'border-ink' : 'border-pos') : ''}`}
               >
@@ -122,7 +170,7 @@ export function QuizPage() {
                         <input
                           className="accent-ink mt-1.5"
                           type={question.kind === 'multi_choice' ? 'checkbox' : 'radio'}
-                          name={`question-${index}`}
+                          name={`question-${question.id}`}
                           value={option.id}
                           checked={selected.includes(option.id)}
                           onChange={(event) => {
@@ -132,7 +180,7 @@ export function QuizPage() {
                                   ? [...selected, option.id]
                                   : selected.filter((id) => id !== option.id)
                                 : [option.id];
-                            setAnswer(index, { kind: 'choice', optionIds });
+                            setAnswer(question.id, { optionIds });
                           }}
                         />
                         <InlineMarkdown className="text-sm leading-6">
@@ -152,8 +200,7 @@ export function QuizPage() {
                       disabled={result !== null}
                       className="readout border-rule bg-surface mt-1 w-40 rounded-md border px-2 py-1.5 text-sm"
                       onChange={(event) =>
-                        setAnswer(index, {
-                          kind: 'numeric',
+                        setAnswer(question.id, {
                           value: event.target.value === '' ? null : Number(event.target.value),
                         })
                       }
@@ -168,18 +215,24 @@ export function QuizPage() {
                       type="text"
                       disabled={result !== null}
                       className="border-rule bg-surface mt-1 w-full rounded-md border px-2 py-1.5 text-sm"
-                      onChange={(event) =>
-                        setAnswer(index, { kind: 'text', text: event.target.value })
-                      }
+                      onChange={(event) => setAnswer(question.id, { text: event.target.value })}
                     />
                   </label>
                 )}
 
                 {graded && (
-                  <div className="border-rule mt-4 border-t pt-3">
+                  <div className="border-rule mt-4 border-t pt-3" data-testid="explanation">
+                    {!graded.isCorrect && (
+                      <p className="readout text-muted text-xs">
+                        Correct answer:{' '}
+                        <span className="text-ink">
+                          {describeCorrect(question.kind, graded.correct, question.options)}
+                        </span>
+                      </p>
+                    )}
                     <Eyebrow>Explanation</Eyebrow>
                     <Markdown className="text-sm [&_p]:my-2 [&_p]:leading-6">
-                      {question.explanationMd}
+                      {graded.explanationMd}
                     </Markdown>
                   </div>
                 )}
@@ -191,13 +244,37 @@ export function QuizPage() {
 
       {!result && (
         <div className="border-rule mt-6 flex flex-wrap items-center gap-3 border-t pt-6">
-          <Button variant="primary" onClick={submit}>
-            Submit answers
+          <Button variant="primary" onClick={onSubmit} disabled={submit.isPending}>
+            {submit.isPending ? 'Submitting…' : 'Submit answers'}
           </Button>
           <span className="readout text-muted text-xs">
             {answeredCount}/{quiz.questions.length} answered
           </span>
         </div>
+      )}
+
+      {history.length > 0 && (
+        <section className="mt-10" data-testid="attempt-history">
+          <Eyebrow>Previous attempts</Eyebrow>
+          <ol className="border-rule divide-rule mt-2 divide-y overflow-hidden rounded-lg border">
+            {history.map((attempt) => (
+              <li
+                key={attempt.id}
+                className="bg-surface flex items-baseline justify-between gap-3 px-4 py-2 text-sm"
+              >
+                <span className="readout text-muted text-xs">
+                  {new Date(attempt.submittedAt).toLocaleString()}
+                </span>
+                <span className="readout">
+                  {attempt.scorePoints}/{attempt.maxPoints}
+                  <span className="text-muted ml-2 text-xs">
+                    {attempt.passed ? 'passed' : 'not passed'}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
       )}
     </div>
   );

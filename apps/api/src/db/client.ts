@@ -6,6 +6,20 @@ import * as schema from './schema.js';
 
 export type Db = PostgresJsDatabase<typeof schema>;
 
+/**
+ * The handle inside a `db.transaction(async (tx) => ...)` callback. Derived from `Db`
+ * rather than spelled out as `PgTransaction<PostgresJsQueryResultHKT, ...>` so it cannot
+ * drift from whatever Drizzle actually hands over.
+ */
+export type DbTransaction = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/**
+ * "A thing you can run queries on." Helpers that a caller may want to run either standalone
+ * or inside a transaction take this, which is how `replaceBackupCodes` can be called from
+ * the enrollment transaction and from the regenerate route alike.
+ */
+export type DbLike = Db | DbTransaction;
+
 export interface DbClient {
   db: Db;
   /** The raw postgres.js handle, for `EXPLAIN`, `LISTEN`, and test fixtures. */

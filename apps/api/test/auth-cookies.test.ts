@@ -16,6 +16,9 @@ const baseEnv = {
   DATABASE_URL: 'postgres://lab:lab@localhost:5432/lab',
   SESSION_SECRET: 'a'.repeat(32),
   APP_ORIGIN: 'http://localhost:5173',
+  // M6: production refuses to boot without a 32-byte MFA key. This file is about cookie
+  // flags, not key management, so it just supplies a valid one.
+  MFA_ENCRYPTION_KEY: '0'.repeat(64),
 };
 
 const devConfig = loadConfig({ ...baseEnv, NODE_ENV: 'development' });

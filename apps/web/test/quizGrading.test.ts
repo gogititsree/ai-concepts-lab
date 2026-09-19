@@ -1,137 +1,99 @@
-import type { QuizFile, QuizQuestionFile } from '@lab/shared';
+import type { QuizOption } from '@lab/shared';
 import { describe, expect, it } from 'vitest';
 
-import { getModule } from '../src/content/static';
-import { gradeQuestion, gradeQuiz } from '../src/lib/quizGrading';
+import {
+  describeCorrect,
+  formatPercent,
+  isAnswered,
+  selectedOptionIds,
+} from '../src/lib/quizGrading';
+import { quizDetail } from './fixtures/content';
 
-const single: QuizQuestionFile = {
-  kind: 'single_choice',
-  promptMd: 'One answer',
-  options: [
-    { id: 'a', textMd: 'a' },
-    { id: 'b', textMd: 'b' },
-  ],
-  correct: { optionIds: ['b'] },
-  explanationMd: 'because',
-  points: 1,
-};
+/**
+ * This file used to test a grader that ran in the browser against an answer key in the
+ * bundle. M7 moved grading to `POST /quizzes/:id/attempts`, and the API's own unit suite
+ * (`apps/api/test/grading.test.ts`) now owns every rule, kind by kind and boundary by
+ * boundary. What is left on this side is the presentation of a result that has already
+ * been graded — and one assertion that the answers really are gone.
+ */
 
-const multi: QuizQuestionFile = {
-  kind: 'multi_choice',
-  promptMd: 'Several answers',
-  options: [
-    { id: 'a', textMd: 'a' },
-    { id: 'b', textMd: 'b' },
-    { id: 'c', textMd: 'c' },
-  ],
-  correct: { optionIds: ['a', 'c'] },
-  explanationMd: 'because',
-  points: 2,
-};
+const options: QuizOption[] = [
+  { id: 'a', textMd: 'Rotates the line' },
+  { id: 'b', textMd: 'Shifts the line' },
+  { id: 'c', textMd: 'Nothing at all' },
+];
 
-const numeric: QuizQuestionFile = {
-  kind: 'numeric',
-  promptMd: 'A number',
-  correct: { value: -0.032, tolerance: 0.005 },
-  explanationMd: 'because',
-  points: 1,
-};
-
-const text: QuizQuestionFile = {
-  kind: 'short_text',
-  promptMd: 'A word',
-  correct: { acceptable: ['Backpropagation'], normalize: 'lower_trim' },
-  explanationMd: 'because',
-  points: 1,
-};
-
-describe('gradeQuestion', () => {
-  it('grades single_choice on the one selected id', () => {
-    expect(gradeQuestion(single, { kind: 'choice', optionIds: ['b'] })).toBe(true);
-    expect(gradeQuestion(single, { kind: 'choice', optionIds: ['a'] })).toBe(false);
-    expect(gradeQuestion(single, { kind: 'choice', optionIds: ['a', 'b'] })).toBe(false);
-  });
-
-  it('grades multi_choice as set equality -- no partial credit', () => {
-    expect(gradeQuestion(multi, { kind: 'choice', optionIds: ['a', 'c'] })).toBe(true);
-    expect(gradeQuestion(multi, { kind: 'choice', optionIds: ['c', 'a'] })).toBe(true);
-    expect(gradeQuestion(multi, { kind: 'choice', optionIds: ['a'] })).toBe(false);
-    expect(gradeQuestion(multi, { kind: 'choice', optionIds: ['a', 'b', 'c'] })).toBe(false);
-  });
-
-  it('grades numeric inside the authored tolerance, sign included', () => {
-    expect(gradeQuestion(numeric, { kind: 'numeric', value: -0.032 })).toBe(true);
-    expect(gradeQuestion(numeric, { kind: 'numeric', value: -0.03 })).toBe(true);
-    expect(gradeQuestion(numeric, { kind: 'numeric', value: 0.032 })).toBe(false);
-    expect(gradeQuestion(numeric, { kind: 'numeric', value: -0.04 })).toBe(false);
-    expect(gradeQuestion(numeric, { kind: 'numeric', value: null })).toBe(false);
-  });
-
-  it('grades short_text after normalisation', () => {
-    expect(gradeQuestion(text, { kind: 'text', text: '  backpropagation ' })).toBe(true);
-    expect(gradeQuestion(text, { kind: 'text', text: 'chain rule' })).toBe(false);
-  });
-
-  it('counts an unanswered question as wrong, whatever its kind', () => {
-    for (const question of [single, multi, numeric, text]) {
-      expect(gradeQuestion(question, undefined)).toBe(false);
-    }
-  });
-
-  it('refuses an answer of the wrong shape for the question', () => {
-    expect(gradeQuestion(single, { kind: 'numeric', value: 1 })).toBe(false);
-    expect(gradeQuestion(numeric, { kind: 'choice', optionIds: ['a'] })).toBe(false);
+describe('formatPercent', () => {
+  it('rounds to whole percent', () => {
+    expect(formatPercent(0.7)).toBe('70 %');
+    expect(formatPercent(0.875)).toBe('88 %');
+    expect(formatPercent(0)).toBe('0 %');
+    expect(formatPercent(1)).toBe('100 %');
   });
 });
 
-describe('gradeQuiz', () => {
-  const quiz: QuizFile = {
-    title: 'Mixed',
-    passThreshold: 0.7,
-    questions: [single, multi, numeric],
-  };
-
-  it('sums the authored points rather than counting questions', () => {
-    const result = gradeQuiz(quiz, [
-      { kind: 'choice', optionIds: ['b'] },
-      { kind: 'choice', optionIds: ['a', 'c'] },
-      { kind: 'numeric', value: 0 },
-    ]);
-    expect(result.maxPoints).toBe(4);
-    expect(result.scorePoints).toBe(3);
-    expect(result.passed).toBe(true);
-  });
-
-  it('fails below the threshold', () => {
-    const result = gradeQuiz(quiz, [{ kind: 'choice', optionIds: ['b'] }, undefined, undefined]);
-    expect(result.scorePoints).toBe(1);
-    expect(result.passed).toBe(false);
-  });
-
-  it('passes on exactly the threshold despite float64 division', () => {
-    const tenOnePointers: QuizFile = {
-      title: 'Ten',
-      passThreshold: 0.7,
-      questions: Array.from({ length: 10 }, () => single),
-    };
-    const answers = Array.from({ length: 10 }, (_, index) =>
-      index < 7 ? { kind: 'choice' as const, optionIds: ['b'] } : undefined,
+describe('describeCorrect', () => {
+  it('names the option rather than its id', () => {
+    expect(describeCorrect('single_choice', { optionIds: ['b'] }, options)).toBe('Shifts the line');
+    expect(describeCorrect('multi_choice', { optionIds: ['a', 'c'] }, options)).toBe(
+      'Rotates the line + Nothing at all',
     );
-    const result = gradeQuiz(tenOnePointers, answers);
-    expect(result.fraction).toBeLessThan(0.7 + 1e-12);
-    expect(result.passed).toBe(true);
   });
 
-  it('grades the shipped Module 1 quiz from its own answer key', () => {
-    const quizFile = getModule('neurons')!.quiz;
-    const answers = quizFile.questions.map((question) => {
-      const correct = question.correct;
-      if ('optionIds' in correct) return { kind: 'choice' as const, optionIds: correct.optionIds };
-      if ('value' in correct) return { kind: 'numeric' as const, value: correct.value };
-      return { kind: 'text' as const, text: correct.acceptable[0] ?? '' };
-    });
-    const result = gradeQuiz(quizFile, answers);
-    expect(result.scorePoints).toBe(result.maxPoints);
-    expect(result.passed).toBe(true);
+  it('falls back to the id when the options are missing', () => {
+    expect(describeCorrect('single_choice', { optionIds: ['z'] }, options)).toBe('z');
+    expect(describeCorrect('single_choice', { optionIds: ['b'] }, null)).toBe('b');
+  });
+
+  it('shows a numeric tolerance only when there is one', () => {
+    expect(describeCorrect('numeric', { value: 0.7, tolerance: 0.005 }, null)).toBe(
+      '0.7 (± 0.005)',
+    );
+    expect(describeCorrect('numeric', { value: 17, tolerance: 0 }, null)).toBe('17');
+  });
+
+  it('lists every acceptable short-text answer', () => {
+    expect(
+      describeCorrect(
+        'short_text',
+        { acceptable: ['softmax', 'the softmax'], normalize: 'lower_trim' },
+        null,
+      ),
+    ).toBe('softmax / the softmax');
+  });
+});
+
+describe('isAnswered', () => {
+  it('is false for nothing, an empty selection, a blank number and blank text', () => {
+    expect(isAnswered(undefined)).toBe(false);
+    expect(isAnswered({ optionIds: [] })).toBe(false);
+    expect(isAnswered({ value: null })).toBe(false);
+    expect(isAnswered({ text: '   ' })).toBe(false);
+  });
+
+  it('is true once there is something to submit', () => {
+    expect(isAnswered({ optionIds: ['a'] })).toBe(true);
+    expect(isAnswered({ value: 0 })).toBe(true);
+    expect(isAnswered({ text: 'softmax' })).toBe(true);
+  });
+});
+
+describe('selectedOptionIds', () => {
+  it('returns the selection, or nothing for the other answer shapes', () => {
+    expect(selectedOptionIds({ optionIds: ['a', 'b'] })).toEqual(['a', 'b']);
+    expect(selectedOptionIds({ value: 1 })).toEqual([]);
+    expect(selectedOptionIds(undefined)).toEqual([]);
+  });
+});
+
+describe('the quiz the browser receives', () => {
+  it('contains no answer key at all', () => {
+    for (const slug of ['neurons', 'neural-networks', 'how-llms-work']) {
+      const serialised = JSON.stringify(quizDetail(slug));
+      expect(serialised.toLowerCase(), slug).not.toContain('explanation');
+      expect(serialised, slug).not.toContain('"correct"');
+      expect(serialised, slug).not.toContain('acceptable');
+      expect(serialised, slug).not.toContain('tolerance');
+    }
   });
 });
