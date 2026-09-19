@@ -1,1 +1,118 @@
 @import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * The rule the whole interface follows: **colour means data.** Chrome is graphite and paper
+ * with hairline rules; the only saturated colours in the app are the diverging weight scale
+ * (blue negative -> red positive) and the sequential activation ramp. A button is never red,
+ * so a red thing on screen is always a number.
+ *
+ * Values live on :root and flip under prefers-color-scheme, then `@theme inline` hands them
+ * to Tailwind so `bg-surface` / `text-muted` / `border-rule` work in both schemes without a
+ * `dark:` variant on every element.
+ */
+:root {
+  --paper: #f4f6f9;
+  --surface: #ffffff;
+  --surface-sunk: #eef1f6;
+  --rule: #d8dee8;
+  --grid: #e4e9f1;
+  --ink: #0b1220;
+  --muted: #566078;
+  --neg: #2d5fe0;
+  --pos: #d8443c;
+  --seq-low: #fdf3e2;
+  --seq-high: #7a4a08;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #080d17;
+    --surface: #111a2b;
+    --surface-sunk: #0c1424;
+    --rule: #223049;
+    --grid: #182338;
+    --ink: #e8ecf4;
+    --muted: #94a1b8;
+    --neg: #6f95f5;
+    --pos: #ef6a60;
+    --seq-low: #1b1608;
+    --seq-high: #f0b357;
+  }
+}
+
+@theme inline {
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
+
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunk: var(--surface-sunk);
+  --color-rule: var(--rule);
+  --color-grid: var(--grid);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-neg: var(--neg);
+  --color-pos: var(--pos);
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  background-color: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * The signature: the interface is drawn on the same plotting paper as the visualisations, so
+ * a canvas sits on the page as a window onto the surface rather than a box pasted over it.
+ * 24px squares, hairline, and it lines up with the grid the canvases draw themselves.
+ */
+.plot-grid {
+  background-image:
+    linear-gradient(to right, var(--grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: -1px -1px;
+}
+
+/* Tabular figures everywhere a number can change under you: readouts must not jitter. */
+.readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* A long display equation should scroll inside its own box, not widen the phone. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

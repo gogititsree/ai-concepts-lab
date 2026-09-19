@@ -8,28 +8,23 @@
     "config": {
       "datasets": ["blobs", "diagonal", "xor"],
       "defaultLr": 0.1,
+      "seed": 42,
+      "reflectionMd": "You ran XOR for twenty epochs and the line never settled. Write down, in your own words, *why* -- not \"it is not linearly separable\", but what you saw the line doing and which points it kept trading off. Lesson 2 has the algebra; your sentence is the thing you will actually remember.",
       "tasks": [
         {
           "id": "separate-blobs",
           "label": "Reach 100% accuracy on the blobs dataset",
-          "check": {
-            "dataset": "blobs",
-            "accuracy": 1.0
-          }
+          "hintMd": "Pick **blobs**, then hold down auto-run. The two clouds are linearly separable, so the rule goes quiet the moment it finds a line.",
+          "check": { "dataset": "blobs", "accuracy": 1.0 }
         },
         {
           "id": "try-xor",
           "label": "Run at least 20 epochs on XOR and watch it fail",
-          "check": {
-            "dataset": "xor",
-            "epochsRun": ">=20"
-          }
+          "hintMd": "Switch to **xor** and run epochs. Watch the accuracy readout bounce instead of climbing -- the rule is cycling, not converging.",
+          "check": { "dataset": "xor", "epochsRun": ">=20" }
         }
       ]
     },
-    "completionRule": {
-      "type": "tasks",
-      "required": 2
-    }
+    "completionRule": { "type": "tasks", "required": 2 }
   }
 ]

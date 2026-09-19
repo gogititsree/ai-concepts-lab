@@ -4,66 +4,118 @@
   "questions": [
     {
       "kind": "single_choice",
-      "promptMd": "For a single output neuron with sigmoid activation and loss $L = \\tfrac12 (y - \\hat y)^2$, where $\\hat y = \\sigma(z)$, what is $\\partial L/\\partial z$?",
+      "promptMd": "For a single output neuron with sigmoid activation and loss **L = 0.5 (y - yhat)^2**, where `yhat = sigmoid(z)`, what is $dL/dz$?",
       "options": [
-        {
-          "id": "a",
-          "textMd": "$(\\hat y - y)$"
-        },
-        {
-          "id": "b",
-          "textMd": "$(\\hat y - y)\\,\\hat y(1 - \\hat y)$"
-        },
-        {
-          "id": "c",
-          "textMd": "$\\hat y(1 - \\hat y)$"
-        },
-        {
-          "id": "d",
-          "textMd": "$(y - \\hat y)\\,z$"
-        }
+        { "id": "a", "textMd": "`(yhat - y)`" },
+        { "id": "b", "textMd": "`(yhat - y) * yhat * (1 - yhat)`" },
+        { "id": "c", "textMd": "`yhat * (1 - yhat)`" },
+        { "id": "d", "textMd": "`(y - yhat) * z`" }
       ],
-      "correct": {
-        "optionIds": ["b"]
-      },
-      "explanationMd": "Chain rule: $\\partial L/\\partial \\hat y = (\\hat y - y)$ and $\\partial \\hat y/\\partial z = \\hat y(1-\\hat y)$. Multiply them.",
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "Chain rule in two links: `dL/dyhat = (yhat - y)` and `dyhat/dz = sigmoid'(z) = yhat(1 - yhat)`. Option (a) is what you get with cross-entropy instead of MSE -- there the sigmoid derivative cancels against the loss derivative, which is exactly why that pairing is so popular.",
       "points": 1
     },
     {
       "kind": "numeric",
-      "promptMd": "With the same network, $\\hat y = 0.8$ and $y = 1$. Compute $\\partial L/\\partial z$.",
-      "correct": {
-        "value": -0.032,
-        "tolerance": 0.005
-      },
-      "explanationMd": "$(0.8 - 1) \\times 0.8 \\times 0.2 = -0.2 \\times 0.16 = -0.032$. The sign says the update should push `z` up, which pushes the prediction towards 1.",
-      "points": 2
+      "promptMd": "Same setup as the previous question. With `yhat = 0.8` and `y = 1`, compute $dL/dz$. (Sign matters.)",
+      "correct": { "value": -0.032, "tolerance": 0.005 },
+      "explanationMd": "(0.8 - 1) * 0.8 * 0.2 = -0.2 * 0.16 = -0.032. It is negative, so the gradient-descent update `w <- w - eta * dL/dw` *increases* z, pushing `yhat` up towards the target of 1 -- which is what you would want.",
+      "points": 1
     },
     {
       "kind": "single_choice",
-      "promptMd": "Why does gradient checking use a **central** difference $(L(w+\\epsilon) - L(w-\\epsilon))/2\\epsilon$ rather than a forward difference?",
+      "promptMd": "Why does gradient checking use a **central** difference `(L(w + eps) - L(w - eps)) / (2 eps)` rather than a one-sided one?",
+      "options": [
+        { "id": "a", "textMd": "It is faster: one forward pass instead of two" },
+        {
+          "id": "b",
+          "textMd": "Its truncation error shrinks like $eps^2$ instead of $eps$, for one extra forward pass"
+        },
+        { "id": "c", "textMd": "One-sided differences do not work with negative weights" },
+        { "id": "d", "textMd": "It avoids floating-point cancellation entirely" }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "The symmetric form cancels the second-order Taylor term, which is worth about five orders of magnitude of accuracy at `eps = 1e-5`. (a) has it backwards -- it costs an extra pass -- and (d) is wrong: cancellation is still there, and it is precisely why `eps` cannot simply be made tiny.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "You set the learning rate to 10 and train on XOR. What do you expect to see?",
+      "options": [
+        { "id": "a", "textMd": "The same result, ten times sooner" },
+        {
+          "id": "b",
+          "textMd": "The loss oscillating or climbing, with saturated units and a boundary that stops responding"
+        },
+        { "id": "c", "textMd": "A smooth curve that stops just short of the minimum" },
+        { "id": "d", "textMd": "No change: the learning rate only scales the plotted loss" }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "A step proportional to the gradient overshoots the valley and lands further up the other side. Weights blow up, sigmoids saturate at 0 or 1, their derivatives go to zero, and the network freezes in a bad configuration. Run it in the exercise -- the heatmap going flat is worth seeing once.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "In the backward pass, what is the role of the transposed weight matrix `W^T` of the *next* layer?",
+      "options": [
+        { "id": "a", "textMd": "It undoes the activation function" },
+        {
+          "id": "b",
+          "textMd": "It routes the delta from the next layer back to this one along the same edges, weighted the same way"
+        },
+        { "id": "c", "textMd": "It normalises the gradients so they sum to 1" },
+        { "id": "d", "textMd": "It is an implementation detail with no mathematical meaning" }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "Forwards, `W` carries activations from layer l to layer l+1; backwards, `W^T` carries blame from l+1 to l over the same connections. A large weight that contributed a lot of signal receives a proportionally large share of the error.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "On the network graph, the edges into the hidden layer are drawn hair-thin while the edges into the output are thick. What are you looking at?",
+      "options": [
+        { "id": "a", "textMd": "A rendering bug: edge width is arbitrary" },
+        {
+          "id": "b",
+          "textMd": "The vanishing gradient -- each backward step multiplies by a weight and by a sigmoid derivative of at most 0.25, so earlier layers get far smaller gradients"
+        },
+        { "id": "c", "textMd": "The network has already converged" },
+        { "id": "d", "textMd": "The hidden layer has no influence on the output" }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "In Lesson 2.3's worked example the output weights get gradients around 0.08 and the input weights around 0.001 -- a hundredfold shrink across a single layer. Early layers learning slowly is a direct consequence, and this is its visual signature.",
+      "points": 1
+    },
+    {
+      "kind": "numeric",
+      "promptMd": "How many trainable parameters does a 2-4-1 network have, counting weights and biases in every layer?",
+      "correct": { "value": 17, "tolerance": 0 },
+      "explanationMd": "Layer 1: 2 x 4 weights + 4 biases = 12. Layer 2: 4 x 1 weights + 1 bias = 5. Total 17. Parameter count is the capacity you are spending, and it grows with the product of adjacent layer sizes -- which is why widening a hidden layer gets expensive fast.",
+      "points": 1
+    },
+    {
+      "kind": "multi_choice",
+      "promptMd": "Which statements about hidden layers are true? (Select all that apply.)",
       "options": [
         {
           "id": "a",
-          "textMd": "It needs one fewer evaluation of the loss"
+          "textMd": "Without a nonlinearity between them, stacked layers collapse into a single equivalent linear map"
         },
         {
           "id": "b",
-          "textMd": "Its error is $O(\\epsilon^2)$ rather than $O(\\epsilon)$, so it agrees with the analytic gradient to far more digits"
+          "textMd": "A hidden unit can be read as a learned feature -- a re-description of the input that makes the output layer's job linear"
         },
         {
           "id": "c",
-          "textMd": "It works even when the loss is not differentiable"
+          "textMd": "A 2-2-1 network solves XOR by drawing one curved boundary in the input space"
         },
         {
           "id": "d",
-          "textMd": "It avoids floating-point arithmetic"
+          "textMd": "Training twice from different seeds generally gives different hidden weights that solve the problem equally well"
         }
       ],
-      "correct": {
-        "optionIds": ["b"]
-      },
-      "explanationMd": "The first-order error terms cancel in the central difference, which is what makes a relative-error threshold of 1e-6 a meaningful test rather than a coin flip.",
+      "correct": { "optionIds": ["a", "b", "d"] },
+      "explanationMd": "(a) is the reason the nonlinearity is not optional. (b) is the useful mental model for depth. (d) is true and worth internalising: there is no canonical solution, only a family of them. (c) is false -- the network draws two *straight* lines and classifies by which combination of sides a point falls on. Apparent curvature in the heatmap is always many straight cuts recombined.",
       "points": 1
     }
   ]

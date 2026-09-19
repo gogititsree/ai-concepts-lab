@@ -150,9 +150,144 @@ export type CompletionRule = z.infer<typeof CompletionRuleSchema>;
  */
 const LooseConfigSchema = z.record(z.unknown());
 
-export const ExerciseConfigSchemas: Record<ExerciseKind, z.ZodType<Record<string, unknown>>> = {
-  perceptron: LooseConfigSchema,
-  mlp: LooseConfigSchema,
+/**
+ * The dataset generators in `@lab/nn-core`'s `DATASET_KINDS`.
+ *
+ * Spelled out here rather than imported: `packages/shared` is the contract layer and must
+ * stay dependency-free of the ML math (the API imports shared, and has no business pulling
+ * in a neural network). The cost of the duplication is one list; the protection is that a
+ * content file naming a dataset that does not exist fails at seed time rather than as an
+ * empty canvas.
+ */
+const DatasetKindSchema = z.enum([
+  'blobs',
+  'diagonal',
+  'xor',
+  'xor-noisy',
+  'circle',
+  'moons',
+  'spiral',
+]);
+
+/**
+ * A threshold written the way the curriculum doc writes it: `">=20"`, `"<0.05"`, `">0.95"`.
+ *
+ * The alternative — `{ op: 'gte', value: 20 }` — is more honest JSON and much worse to author
+ * and to read in a diff. The regex is the whole guard, and the exercise UI parses it with the
+ * same grammar (`apps/web/src/features/exercises/checkRules.ts`).
+ */
+const ComparisonSchema = z
+  .string()
+  .regex(/^(>=|<=|>|<|==)\s*-?\d+(\.\d+)?$/, 'must be a comparison such as ">=20" or "<0.05"');
+
+/** Every auto-checked task carries an id, a label for the checklist and an optional hint. */
+const TaskBaseShape = {
+  id: SlugSchema,
+  label: z.string().min(1),
+  hintMd: z.string().min(1).optional(),
+};
+
+/**
+ * Module 1's `perceptron` exercise (M3). Tightened from the loose record so that a typo in a
+ * dataset name, a task with no check at all, or a learning rate of `"0.1"` is a seed-time
+ * error with a path, not a playground that silently does nothing.
+ */
+export const PerceptronConfigSchema = z
+  .object({
+    datasets: z.array(DatasetKindSchema).min(1),
+    defaultLr: z.number().positive().max(10),
+    /** Fixed so "reset" gives the same points and the same initial line twice. */
+    seed: z.number().int().nonnegative().default(42),
+    /** Shown once every task passes; the "what did you notice?" prompt from docs/04. */
+    reflectionMd: z.string().min(1).optional(),
+    tasks: z
+      .array(
+        z
+          .object({
+            ...TaskBaseShape,
+            check: z
+              .object({
+                dataset: DatasetKindSchema,
+                /** Exact target accuracy, e.g. `1.0` for "separate the blobs". */
+                accuracy: z.number().min(0).max(1).optional(),
+                epochsRun: ComparisonSchema.optional(),
+              })
+              .strict()
+              .refine(
+                (check) => check.accuracy !== undefined || check.epochsRun !== undefined,
+                'a check needs at least one of accuracy or epochsRun',
+              ),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
+export type PerceptronConfig = z.infer<typeof PerceptronConfigSchema>;
+
+/**
+ * Module 2's `mlp` exercise (M3). `record: 'hiddenSize'` marks the one task whose answer is a
+ * measurement the learner reports rather than a pass/fail — `circle-hidden-size` in docs/04.
+ */
+export const MlpConfigSchema = z
+  .object({
+    datasets: z.array(DatasetKindSchema).min(1),
+    hiddenSizes: z.array(z.number().int().min(1).max(16)).min(1),
+    activations: z.array(z.enum(['sigmoid', 'tanh', 'relu'])).min(1),
+    defaultLr: z.number().positive().max(10),
+    defaultHiddenSize: z.number().int().min(1).max(16).optional(),
+    seed: z.number().int().nonnegative().default(42),
+    reflectionMd: z.string().min(1).optional(),
+    tasks: z
+      .array(
+        z
+          .object({
+            ...TaskBaseShape,
+            check: z
+              .object({
+                dataset: DatasetKindSchema.optional(),
+                loss: ComparisonSchema.optional(),
+                accuracy: ComparisonSchema.optional(),
+                maxEpochs: z.number().int().positive().optional(),
+                singleSteps: ComparisonSchema.optional(),
+                record: z.enum(['hiddenSize']).optional(),
+              })
+              .strict()
+              .refine(
+                (check) =>
+                  check.loss !== undefined ||
+                  check.accuracy !== undefined ||
+                  check.singleSteps !== undefined,
+                'a check needs at least one of loss, accuracy or singleSteps',
+              ),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict()
+  .superRefine((config, ctx) => {
+    if (
+      config.defaultHiddenSize !== undefined &&
+      !config.hiddenSizes.includes(config.defaultHiddenSize)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['defaultHiddenSize'],
+        message: `defaultHiddenSize ${config.defaultHiddenSize} is not one of hiddenSizes`,
+      });
+    }
+  });
+export type MlpConfig = z.infer<typeof MlpConfigSchema>;
+
+/**
+ * `satisfies` rather than a type annotation: the annotation would widen every entry to
+ * `z.ZodType<Record<string, unknown>>` and the web app could no longer do
+ * `z.infer<typeof ExerciseConfigSchemas.perceptron>` to get its typed config for free.
+ */
+export const ExerciseConfigSchemas = {
+  perceptron: PerceptronConfigSchema,
+  mlp: MlpConfigSchema,
   tokenizer: LooseConfigSchema,
   embeddings: LooseConfigSchema,
   attention: LooseConfigSchema,
@@ -160,7 +295,12 @@ export const ExerciseConfigSchemas: Record<ExerciseKind, z.ZodType<Record<string
   structured_output: LooseConfigSchema,
   agent: LooseConfigSchema,
   harness: LooseConfigSchema,
-};
+} satisfies Record<ExerciseKind, z.ZodTypeAny>;
+
+/** Indexing the map above gives a union of schema types; this collapses it to something callable. */
+function configSchemaFor(kind: ExerciseKind): z.ZodTypeAny {
+  return ExerciseConfigSchemas[kind];
+}
 
 export const ExerciseFileEntrySchema = z
   .object({
@@ -177,7 +317,7 @@ export const ExerciseFileEntrySchema = z
   // Re-validate `config` through the per-kind schema so tightening a kind later is a
   // one-line change here and every existing content file is checked against it.
   .superRefine((exercise, ctx) => {
-    const result = ExerciseConfigSchemas[exercise.kind].safeParse(exercise.config);
+    const result = configSchemaFor(exercise.kind).safeParse(exercise.config);
     if (!result.success) {
       for (const issue of result.error.issues) {
         ctx.addIssue({ ...issue, path: ['config', ...issue.path] });

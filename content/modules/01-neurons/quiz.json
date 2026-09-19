@@ -6,26 +6,12 @@
       "kind": "single_choice",
       "promptMd": "A perceptron has weights **w = (2, -1)**, bias **b = -1**, and a step activation (output 1 when z >= 0). What does it output for **x = (1, 1)**?",
       "options": [
-        {
-          "id": "a",
-          "textMd": "0"
-        },
-        {
-          "id": "b",
-          "textMd": "1"
-        },
-        {
-          "id": "c",
-          "textMd": "0.5"
-        },
-        {
-          "id": "d",
-          "textMd": "undefined"
-        }
+        { "id": "a", "textMd": "0" },
+        { "id": "b", "textMd": "1" },
+        { "id": "c", "textMd": "0.5" },
+        { "id": "d", "textMd": "undefined" }
       ],
-      "correct": {
-        "optionIds": ["b"]
-      },
+      "correct": { "optionIds": ["b"] },
       "explanationMd": "z = 2*1 + (-1)*1 + (-1) = 0, and 0 >= 0, so the step activation outputs 1. Note how much rests on the `>=` convention: with a strict `>` the same input would output 0. State the convention.",
       "points": 1
     },
@@ -33,54 +19,91 @@
       "kind": "single_choice",
       "promptMd": "Changing **only** the bias `b` of a two-input neuron does what to its decision boundary?",
       "options": [
-        {
-          "id": "a",
-          "textMd": "Rotates the line about the origin"
-        },
-        {
-          "id": "b",
-          "textMd": "Shifts the line without changing its direction"
-        },
-        {
-          "id": "c",
-          "textMd": "Nothing; the bias only affects the output scale"
-        },
-        {
-          "id": "d",
-          "textMd": "Makes the boundary curved"
-        }
+        { "id": "a", "textMd": "Rotates the line about the origin" },
+        { "id": "b", "textMd": "Shifts the line without changing its direction" },
+        { "id": "c", "textMd": "Nothing; the bias only affects the output scale" },
+        { "id": "d", "textMd": "Makes the boundary curved" }
       ],
-      "correct": {
-        "optionIds": ["b"]
-      },
-      "explanationMd": "The weight vector `w` is normal to the line and sets its orientation; `b` only sets the offset along that normal. Rotation needs a change in `w`.",
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "The weight vector `w` is normal to the line and sets its orientation; `b` only sets the offset along that normal. Rotation needs a change in `w`. In the slope-intercept form $x_2 = -(w_1/w_2)x_1 - b/w_2$, the bias appears only in the intercept.",
       "points": 1
     },
     {
       "kind": "single_choice",
       "promptMd": "Which dataset can a **single** neuron never separate?",
       "options": [
-        {
-          "id": "a",
-          "textMd": "Two well-spaced blobs"
-        },
+        { "id": "a", "textMd": "Two well-spaced blobs" },
+        { "id": "b", "textMd": "Points split by a diagonal line" },
+        { "id": "c", "textMd": "XOR" },
+        { "id": "d", "textMd": "Any dataset with more than 50 points" }
+      ],
+      "correct": { "optionIds": ["c"] },
+      "explanationMd": "XOR is not linearly separable: no single straight line puts both positive points on one side. That limitation is exactly what Module 2 fixes by stacking neurons.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "How does the weight vector **w** sit relative to the decision boundary it defines?",
+      "options": [
+        { "id": "a", "textMd": "Parallel to the line, pointing along it" },
+        { "id": "b", "textMd": "Perpendicular to the line, pointing towards the side where z > 0" },
+        { "id": "c", "textMd": "Perpendicular to the line, pointing towards the side where z < 0" },
+        { "id": "d", "textMd": "At 45 degrees to the line, always" }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "The boundary is the set where `w . x + b = 0`, so moving along the line never changes `w . x` -- the line is orthogonal to **w**. Step off the line in the direction of **w** and z increases, which is the side that predicts 1. The exercise draws that arrow; watch it stay square to the line as you drag the sliders.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Why does a perceptron need its own update rule rather than plain gradient descent on its output?",
+      "options": [
+        { "id": "a", "textMd": "Gradient descent only works for more than one layer" },
         {
           "id": "b",
-          "textMd": "Points split by a diagonal line"
+          "textMd": "The step activation has a derivative of zero everywhere it is defined, so the gradient carries no information"
         },
+        { "id": "c", "textMd": "Gradient descent cannot handle a bias term" },
+        {
+          "id": "d",
+          "textMd": "The perceptron rule is just gradient descent with a different name"
+        }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "`stepPrime(z)` is 0 away from the origin and undefined at it, so multiplying by it destroys every update. The perceptron rule sidesteps the derivative entirely by using the raw error `(y - yhat)`. Swapping in a sigmoid is what makes gradient descent -- and therefore Module 2 -- possible.",
+      "points": 1
+    },
+    {
+      "kind": "numeric",
+      "promptMd": "A neuron has **w = (2, -1)** and **b = -1**. What is the net input `z` for **x = (3, 2)**?",
+      "correct": { "value": 3, "tolerance": 0.001 },
+      "explanationMd": "z = 2*3 + (-1)*2 + (-1) = 6 - 2 - 1 = 3. Positive, so the step activation outputs 1 -- and the size of z (not just its sign) tells you how far from the boundary the point sits.",
+      "points": 1
+    },
+    {
+      "kind": "numeric",
+      "promptMd": "A neuron has **w = (0.2, -0.4)**, **b = -0.1**, and sees the example **x = (1, 1)** with true label **y = 1** and learning rate **0.5**. After one perceptron update, what is the new value of `w1`? (Answer to 2 decimal places.)",
+      "correct": { "value": 0.7, "tolerance": 0.005 },
+      "explanationMd": "z = 0.2 - 0.4 - 0.1 = -0.3, so yhat = 0 and the error (y - yhat) = 1. The rule gives w1 <- 0.2 + 0.5 * 1 * 1 = 0.7. Had the prediction been right, the error would be 0 and w1 would not have moved at all.",
+      "points": 1
+    },
+    {
+      "kind": "multi_choice",
+      "promptMd": "Which statements about the perceptron rule `w <- w + eta * (y - yhat) * x` are true? (Select all that apply.)",
+      "options": [
+        { "id": "a", "textMd": "An update happens only when the current prediction is wrong" },
+        { "id": "b", "textMd": "When y = 1 and yhat = 0, the weight vector moves towards **x**" },
         {
           "id": "c",
-          "textMd": "XOR"
+          "textMd": "A larger learning rate changes which points are misclassified at the *current* weights"
         },
         {
           "id": "d",
-          "textMd": "Any dataset with more than 50 points"
+          "textMd": "On data that is not linearly separable, the rule stops once accuracy peaks"
         }
       ],
-      "correct": {
-        "optionIds": ["c"]
-      },
-      "explanationMd": "XOR is not linearly separable: no single straight line puts both positive points on one side. That limitation is exactly what Module 2 fixes by stacking neurons.",
+      "correct": { "optionIds": ["a", "b"] },
+      "explanationMd": "(a) and (b) are the rule's two defining behaviours: correct answers give an error of 0 and no update, and a false negative adds a multiple of **x** to **w**. (c) is false -- the learning rate scales the *update*, not the current prediction. (d) is false and is the point of the XOR task: the rule has no notion of \"best so far\" and will cycle forever, which is why the exercise asks you to watch it fail.",
       "points": 1
     }
   ]

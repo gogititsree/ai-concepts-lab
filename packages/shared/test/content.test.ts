@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ExercisesFileSchema,
+  PerceptronConfigSchema,
   LessonFrontmatterSchema,
   ModuleFileSchema,
   parseFrontmatter,
@@ -89,7 +90,17 @@ describe('ExercisesFileSchema', () => {
     title: 'Perceptron playground',
     kind: 'perceptron',
     orderIndex: 1,
-    config: { defaultLr: 0.1 },
+    config: {
+      datasets: ['blobs', 'xor'],
+      defaultLr: 0.1,
+      tasks: [
+        {
+          id: 'separate-blobs',
+          label: 'Separate the blobs',
+          check: { dataset: 'blobs', accuracy: 1 },
+        },
+      ],
+    },
     completionRule: { type: 'tasks', required: 2 },
   };
 
@@ -190,5 +201,112 @@ describe('QuizFileSchema', () => {
     };
     const parsed = QuizFileSchema.parse(quiz(shortText));
     expect((parsed.questions[0]?.correct as { normalize: string }).normalize).toBe('lower_trim');
+  });
+});
+
+/**
+ * M3 tightened the `perceptron` and `mlp` entries of `ExerciseConfigSchemas`, so the two
+ * exercises the browser can actually run now fail at seed time rather than at mount time.
+ * Every other kind stays loose until its own milestone.
+ */
+describe('per-kind exercise config schemas', () => {
+  const perceptron = (config: unknown) => [
+    {
+      slug: 'perceptron-playground',
+      title: 'Perceptron playground',
+      kind: 'perceptron',
+      orderIndex: 1,
+      config,
+      completionRule: { type: 'tasks', required: 2 },
+    },
+  ];
+
+  const mlp = (config: unknown) => [
+    {
+      slug: 'mlp-playground',
+      title: 'MLP playground',
+      kind: 'mlp',
+      orderIndex: 1,
+      config,
+      completionRule: { type: 'tasks', required: 2 },
+    },
+  ];
+
+  const validPerceptron = {
+    datasets: ['blobs', 'diagonal', 'xor'],
+    defaultLr: 0.1,
+    tasks: [
+      { id: 'separate-blobs', label: 'Separate them', check: { dataset: 'blobs', accuracy: 1 } },
+      { id: 'try-xor', label: 'Watch it fail', check: { dataset: 'xor', epochsRun: '>=20' } },
+    ],
+  };
+
+  const validMlp = {
+    datasets: ['xor', 'circle'],
+    hiddenSizes: [2, 3, 4],
+    activations: ['sigmoid', 'tanh'],
+    defaultLr: 0.5,
+    defaultHiddenSize: 4,
+    tasks: [
+      { id: 'xor-converge', label: 'Converge', check: { dataset: 'xor', loss: '<0.05' } },
+      { id: 'step-through', label: 'Step', check: { singleSteps: '>=1' } },
+    ],
+  };
+
+  it('accepts the shipped perceptron and mlp configs and defaults the seed', () => {
+    const parsed = ExercisesFileSchema.parse(perceptron(validPerceptron));
+    expect(parsed).toHaveLength(1);
+    expect(PerceptronConfigSchema.parse(validPerceptron).seed).toBe(42);
+    expect(ExercisesFileSchema.safeParse(mlp(validMlp)).success).toBe(true);
+  });
+
+  it('rejects a dataset name no generator produces', () => {
+    const bad = { ...validPerceptron, datasets: ['blobz'] };
+    expect(ExercisesFileSchema.safeParse(perceptron(bad)).success).toBe(false);
+  });
+
+  it('rejects a task check with no condition in it', () => {
+    const bad = {
+      ...validPerceptron,
+      tasks: [{ id: 'empty', label: 'Nothing to check', check: { dataset: 'blobs' } }],
+    };
+    expect(ExercisesFileSchema.safeParse(perceptron(bad)).success).toBe(false);
+  });
+
+  it('rejects a comparison that is not a comparison', () => {
+    const bad = {
+      ...validPerceptron,
+      tasks: [
+        { id: 'try-xor', label: 'Watch it fail', check: { dataset: 'xor', epochsRun: 'lots' } },
+      ],
+    };
+    expect(ExercisesFileSchema.safeParse(perceptron(bad)).success).toBe(false);
+  });
+
+  it('reports the failure under config.<path> so the seed error names the field', () => {
+    const result = ExercisesFileSchema.safeParse(perceptron({ ...validPerceptron, defaultLr: -1 }));
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual([0, 'config', 'defaultLr']);
+    }
+  });
+
+  it('rejects a default hidden size that is not offered in the picker', () => {
+    const bad = { ...validMlp, defaultHiddenSize: 7 };
+    expect(ExercisesFileSchema.safeParse(mlp(bad)).success).toBe(false);
+  });
+
+  it('leaves the kinds later milestones own loose', () => {
+    const tokenizer = [
+      {
+        slug: 'bpe',
+        title: 'BPE',
+        kind: 'tokenizer',
+        orderIndex: 1,
+        config: { anything: ['goes', 'for', 'now'] },
+        completionRule: { type: 'manual' },
+      },
+    ];
+    expect(ExercisesFileSchema.safeParse(tokenizer).success).toBe(true);
   });
 });
