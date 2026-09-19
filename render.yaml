@@ -54,3 +54,12 @@ services:
       # Generate with `openssl rand -hex 32` (or `pnpm setup:env` locally).
       - key: MFA_ENCRYPTION_KEY
         sync: false
+      # --- Model provider (M9) ---
+      # Decision 1 in docs/07-open-decisions.md: the free tier has no GPU and no Ollama,
+      # so the deployed app runs no model at all. `/api/v1/model/*` answers
+      # 503 MODEL_UNAVAILABLE and modules 4-6 show a "run this locally" banner, which is
+      # honest about the constraint and gives graceful degradation for free. A Cloudflare
+      # Tunnel to a laptop (option b) is a stretch goal after M13 and would change this
+      # value to `ollama` plus an OLLAMA_BASE_URL secret.
+      - key: MODEL_PROVIDER
+        value: none

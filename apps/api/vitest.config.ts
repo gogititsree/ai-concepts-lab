@@ -24,6 +24,10 @@ export default defineConfig({
       // test opens a socket (postgres.js connects lazily), so any valid URL will do;
       // a real one from the environment is preferred so the value is never misleading.
       DATABASE_URL: process.env.DATABASE_URL ?? 'postgres://lab:lab@localhost:5432/lab',
+      // CLAUDE.md: never call a real model from a test. `fake` is the default the whole
+      // suite inherits; the handful of tests that are *about* `none` or `ollama` build
+      // their own config explicitly.
+      MODEL_PROVIDER: 'fake',
     },
   },
 });

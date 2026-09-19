@@ -4,49 +4,117 @@
   "questions": [
     {
       "kind": "single_choice",
-      "promptMd": "In scaled dot-product attention the raw scores are divided by $\\sqrt{d_k}$ before the softmax. Why?",
+      "promptMd": "In scaled dot-product attention, the raw scores are divided by $\\sqrt{d_k}$ before the softmax. Why?",
       "options": [
-        {
-          "id": "a",
-          "textMd": "To make the weights sum to 1"
-        },
+        { "id": "a", "textMd": "To make the weights sum to 1" },
         {
           "id": "b",
-          "textMd": "To keep scores from growing with vector dimension so the softmax does not saturate"
+          "textMd": "To keep scores from growing with vector dimension so the softmax doesn't saturate"
         },
-        {
-          "id": "c",
-          "textMd": "To normalise the value vectors"
-        },
-        {
-          "id": "d",
-          "textMd": "To speed up computation"
-        }
+        { "id": "c", "textMd": "To normalise the value vectors" },
+        { "id": "d", "textMd": "To speed up computation" }
       ],
-      "correct": {
-        "optionIds": ["b"]
-      },
-      "explanationMd": "Dot products of random vectors grow like $\\sqrt{d_k}$. Without the scaling, large scores push the softmax into a near one-hot regime where gradients vanish. Summing to 1 is the softmax's job, not the scaling's.",
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "Dot products of $d_k$-dimensional vectors grow like $\\sqrt{d_k}$. Without the scaling, large scores push the softmax into a near one-hot regime where the gradient through it vanishes. Summing to 1 is the softmax's job, not the scaling's -- turn the toggle off in the exercise and watch the `mat` weight jump from 0.479 to 0.741.",
       "points": 1
     },
     {
-      "kind": "short_text",
-      "promptMd": "Which single operation guarantees that each row of attention weights sums to 1?",
-      "correct": {
-        "acceptable": ["softmax", "the softmax"],
-        "normalize": "lower_trim"
-      },
-      "explanationMd": "Softmax exponentiates the scores and divides by their sum, so every row is a probability distribution over the keys.",
+      "kind": "single_choice",
+      "promptMd": "Which single step guarantees that each row of attention weights sums to exactly 1?",
+      "options": [
+        { "id": "a", "textMd": "The $\\sqrt{d_k}$ scaling" },
+        { "id": "b", "textMd": "The dot product $QK^{\\top}$" },
+        { "id": "c", "textMd": "The row-wise softmax" },
+        { "id": "d", "textMd": "The multiplication by $V$" }
+      ],
+      "correct": { "optionIds": ["c"] },
+      "explanationMd": "Softmax exponentiates every score (so all of them are positive) and divides by their sum, which makes each row a probability distribution over the keys. Nothing else in the equation normalises anything.",
       "points": 1
     },
     {
       "kind": "numeric",
       "promptMd": "What is the cosine similarity of a non-zero vector with itself?",
-      "correct": {
-        "value": 1.0,
-        "tolerance": 0.001
-      },
-      "explanationMd": "Cosine similarity is the dot product divided by the product of the norms, which is exactly 1 when the two vectors are identical -- the angle between them is zero.",
+      "correct": { "value": 1.0, "tolerance": 0.001 },
+      "explanationMd": "Cosine similarity is the dot product divided by the product of the norms, which is exactly 1 when the two vectors are identical: the angle between them is zero. It is the quickest sanity check there is on an embedding pipeline.",
+      "points": 1
+    },
+    {
+      "kind": "numeric",
+      "promptMd": "In Lesson 3.3's worked example, $\\exp$ of the scaled score for `mat` is $13.911519$ and the eight exponentials sum to $29.036448$. What attention weight does `it` give `mat`? Answer to three decimals.",
+      "correct": { "value": 0.479, "tolerance": 0.002 },
+      "explanationMd": "A softmax weight is just its own exponential over the total: $13.911519 / 29.036448 = 0.479105$. Notice that the winning key still takes less than half the row -- attention is softer than the arrows suggest.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "A BPE tokenizer is trained on the exercise's corpus -- ordinary English prose about tokenizers, containing no digits at all. Which of these sentences tokenises to the **most** tokens, and why?",
+      "options": [
+        {
+          "id": "a",
+          "textMd": "`the tokenizer counted every pair of symbols` -- it is the longest in characters"
+        },
+        {
+          "id": "b",
+          "textMd": "`zebras waltz quixotically through the fog` -- rare letters cost more per letter"
+        },
+        {
+          "id": "c",
+          "textMd": "`strawberry jam costs 1234567890 dollars` -- every digit is an unknown character"
+        },
+        { "id": "d", "textMd": "All three are about equal: token count tracks character count" }
+      ],
+      "correct": { "optionIds": ["c"] },
+      "explanationMd": "No digit ever appeared in the corpus, so each of the ten is a separate `<unk>` and no merge can ever apply to them. The out-of-domain sentence is expensive too, but its letters at least exist in the vocabulary and some pairs still merge. Character count is the weakest predictor of the three.",
+      "points": 1
+    },
+    {
+      "kind": "multi_choice",
+      "promptMd": "Which of these are true of the BPE training loop? Select all that apply.",
+      "options": [
+        { "id": "a", "textMd": "Each round merges the most frequent adjacent pair of symbols" },
+        {
+          "id": "b",
+          "textMd": "The learned merges must be replayed in the order they were learned"
+        },
+        {
+          "id": "c",
+          "textMd": "Raising the merge count always produces **more** tokens for the same text"
+        },
+        { "id": "d", "textMd": "Training can stop before reaching the requested merge count" },
+        { "id": "e", "textMd": "A merge can join the end of one word to the start of the next" }
+      ],
+      "correct": { "optionIds": ["a", "b", "d"] },
+      "explanationMd": "(a) and (b) are the algorithm. (d) is early stopping: once no pair occurs twice, merging buys no compression, which is why 500 requested merges yields 429 on this corpus. (c) is backwards -- more merges means a bigger vocabulary and **fewer**, longer tokens. (e) is prevented by the `</w>` end-of-word marker, which is also how the decoder knows where the spaces go.",
+      "points": 1
+    },
+    {
+      "kind": "multi_choice",
+      "promptMd": "What does a model's **context window** actually limit? Select all that apply.",
+      "options": [
+        { "id": "a", "textMd": "How much text the model can take into account in a single call" },
+        { "id": "b", "textMd": "The number of parameters in the model" },
+        { "id": "c", "textMd": "How much conversation history can be resent on the next turn" },
+        { "id": "d", "textMd": "The size of the tokenizer's vocabulary" },
+        { "id": "e", "textMd": "The prompt and the generated response, counted together" }
+      ],
+      "correct": { "optionIds": ["a", "c", "e"] },
+      "explanationMd": "The window is a budget of tokens covering prompt plus output, and the whole conversation is resent each turn, so history competes with the answer for the same space. Parameter count and vocabulary size are properties of the trained model and do not change with the window. Anything outside the window has not been forgotten -- it never existed for that call.",
+      "points": 1
+    },
+    {
+      "kind": "single_choice",
+      "promptMd": "Two words sit right next to each other on the PCA scatter of 768-dimensional embeddings, where the first two components explain about 15 % of the variance. What follows?",
+      "options": [
+        { "id": "a", "textMd": "They are close in all 768 dimensions" },
+        {
+          "id": "b",
+          "textMd": "They are close along the two highest-variance directions; check the cosine for the rest"
+        },
+        { "id": "c", "textMd": "Their cosine similarity is 1" },
+        { "id": "d", "textMd": "Nothing: PCA picks its two axes at random" }
+      ],
+      "correct": { "optionIds": ["b"] },
+      "explanationMd": "The projection keeps the two directions of greatest variance and throws the other 766 away -- here about 85 % of the picture. Adjacency on the plot is a hint, not a measurement. The cosine readout uses the full vector, which is why the exercise puts it next to the scatter.",
       "points": 1
     }
   ]

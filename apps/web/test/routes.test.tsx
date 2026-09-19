@@ -181,10 +181,11 @@ describe('the exercise route', () => {
     expect(screen.getByTestId('task-separate-blobs')).toBeInTheDocument();
   });
 
-  it('says so, without crashing, for an exercise kind M3 does not implement', async () => {
-    const exercise = exerciseDetail('how-llms-work');
-    renderAt('/modules/how-llms-work/exercise', {
-      'GET /api/v1/modules/how-llms-work': { body: moduleDetail('how-llms-work') },
+  it('says so, without crashing, for an exercise kind no milestone implements yet', async () => {
+    // `agent` (M10) and `harness` (M11) are the only kinds still missing from the registry.
+    const exercise = exerciseDetail('agents');
+    renderAt('/modules/agents/exercise', {
+      'GET /api/v1/modules/agents': { body: moduleDetail('agents') },
       [`GET /api/v1/exercises/${exercise.id}`]: { body: exercise },
     });
 

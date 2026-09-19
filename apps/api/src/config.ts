@@ -102,6 +102,39 @@ const EnvSchema = z.object({
    * undecryptable. Different blast radius, different key.
    */
   MFA_ENCRYPTION_KEY: z.string().optional(),
+
+  // ------------------------------------------------------------------ model (M9) ----
+
+  /**
+   * Which `ModelProvider` implementation `createProvider()` builds.
+   *
+   *   `ollama` — the real local model. The default in development.
+   *   `fake`   — deterministic scripted responses. **Every test and CI run uses this**
+   *              (CLAUDE.md: never call a real model from a test).
+   *   `none`   — no model at all: `/model/*` answers `503 MODEL_UNAVAILABLE` and the UI
+   *              shows the "run this locally" banner. This is what the free-tier Render
+   *              deployment runs (decision 1 in docs/07-open-decisions.md).
+   *
+   * The default is environment-dependent rather than a constant, and that asymmetry is
+   * the safety property: a production image that was never told about a model must not
+   * spend 90 seconds trying to reach `localhost:11434` on every request.
+   */
+  MODEL_PROVIDER: z.enum(['ollama', 'fake', 'none']).optional(),
+  /** Where Ollama listens. Never leaves the server: `/model/health` does not echo it. */
+  OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
+  /**
+   * `gemma4:latest`, not the `gemma4:e4b` named in the original design docs: `e4b` is not
+   * installed on the machine this project runs on and the M0 spike measured everything
+   * against `latest` (8B, Q4_K_M). See "Findings from M0" in docs/07-open-decisions.md.
+   */
+  OLLAMA_CHAT_MODEL: z.string().min(1).default('gemma4:latest'),
+  OLLAMA_EMBED_MODEL: z.string().min(1).default('nomic-embed-text'),
+  /**
+   * Per-call ceiling. 90 s is not generous, it is *measured*: warm calls take 6–45 s on
+   * this hardware and a cold model load adds another 20–40 s (docs/spike-notes.md). A
+   * 30-second timeout would fail most first calls of the day.
+   */
+  MODEL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(90_000),
 });
 
 /** Treat an env var that is present but empty as absent: `KEY=` in a .env means "unset". */
@@ -146,6 +179,9 @@ const ConfigSchema = EnvSchema.superRefine((env, ctx) => {
   APP_ORIGIN: new URL(env.APP_ORIGIN).origin,
   COOKIE_SECURE: env.COOKIE_SECURE ?? env.NODE_ENV === 'production',
   MFA_ENCRYPTION_KEY: blankToUndefined(env.MFA_ENCRYPTION_KEY) ?? DEV_MFA_ENCRYPTION_KEY,
+  // Dev gets the real model, production gets nothing unless it is told otherwise, and a
+  // test that forgets to say which one it wants gets `none` rather than a socket.
+  MODEL_PROVIDER: env.MODEL_PROVIDER ?? (env.NODE_ENV === 'development' ? 'ollama' : 'none'),
 }));
 
 export type Config = z.infer<typeof ConfigSchema>;

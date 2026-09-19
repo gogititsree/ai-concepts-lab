@@ -25,7 +25,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/integration/**/*.test.ts'],
-    env: { NODE_ENV: 'test' },
+    // `fake` for the same reason as the unit suite: the integration tests are about the
+    // routes and the run persistence, not about inference.
+    env: { NODE_ENV: 'test', MODEL_PROVIDER: 'fake' },
     // Creating and dropping a database per file is slower than a unit test.
     testTimeout: 30_000,
     hookTimeout: 60_000,
