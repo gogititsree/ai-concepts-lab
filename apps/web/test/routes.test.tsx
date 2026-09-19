@@ -182,10 +182,10 @@ describe('the exercise route', () => {
   });
 
   it('says so, without crashing, for an exercise kind no milestone implements yet', async () => {
-    // `agent` (M10) and `harness` (M11) are the only kinds still missing from the registry.
-    const exercise = exerciseDetail('agents');
-    renderAt('/modules/agents/exercise', {
-      'GET /api/v1/modules/agents': { body: moduleDetail('agents') },
+    // M10 added `agent` to the registry, so `harness` (M11) is the last kind missing.
+    const exercise = exerciseDetail('harnesses');
+    renderAt('/modules/harnesses/exercise', {
+      'GET /api/v1/modules/harnesses': { body: moduleDetail('harnesses') },
       [`GET /api/v1/exercises/${exercise.id}`]: { body: exercise },
     });
 

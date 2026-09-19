@@ -1,31 +1,52 @@
 import {
+  AGENT_MAX_ITERATIONS_CAP,
+  AGENT_MAX_ITERATIONS_DEFAULT,
+  CancelRunResponseSchema,
+  CreateRunRequestSchema,
+  CreateRunResponseSchema,
   ModelChatRequestSchema,
   ModelChatResponseSchema,
   ModelHealthResponseSchema,
+  ReportStepsRequestSchema,
+  ReportStepsResponseSchema,
   RunDetailSchema,
   RunListQuerySchema,
   RunListResponseSchema,
+  ToolCatalogResponseSchema,
+  type ChatOptions,
   type ChatRequest,
   type ChatResponse,
+  type RunStep,
+  type RunSummary,
   type StructuredOutputResult,
 } from '@lab/shared';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyBaseLogger, FastifyPluginAsync } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { authContext, requireFullSession } from '../auth/guards.js';
 import { AppError, isAppError, notFound, rateLimited } from '../lib/errors.js';
 import { FixedWindowLimiter } from '../plugins/rate-limit.js';
+import { runAgentLoop } from './agentLoop.js';
 import { createProvider, modelUnavailable, type ModelProvider } from './provider.js';
+import { RunControllerRegistry, RunEventBus, RunSemaphore, type RunEvent } from './runEvents.js';
 import {
   findOwnedRun,
+  isTerminal,
   listRuns,
   loadRun,
+  loadRunSummary,
+  loadStepsAfter,
+  markCancelled,
+  markCompleted,
   RunRecorder,
   startRun,
+  toRunStep,
   type StartRunInput,
 } from './runs.js';
+import { parseLastEventId, SseStream } from './sse.js';
 import { runStructuredChat } from './structured.js';
+import { catalogDefinitions, resolveTools, toolDefinitions, type ToolSpec } from './tools/index.js';
 
 /**
  * `/api/v1/model/*` — the HTTP face of the `ModelProvider` seam (M9).
@@ -69,6 +90,17 @@ export interface ModelRoutesOptions {
 }
 
 const IdParamsSchema = z.object({ id: z.string().uuid() });
+
+/**
+ * The `Last-Event-ID` fallback as a query parameter.
+ *
+ * `EventSource` sets the header by itself on a reconnect, but a caller that is not an
+ * `EventSource` -- curl, a test, a future worker -- cannot set headers on one, and
+ * resuming a trace is exactly the thing someone debugging wants to do by hand.
+ */
+const EventsQuerySchema = z.object({
+  lastEventId: z.coerce.number().int().min(0).optional(),
+});
 
 /** The system/user prompt columns are `NOT NULL`; a request may legitimately omit either. */
 const firstSystemPrompt = (req: ChatRequest): string =>
@@ -116,6 +148,78 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
     (opts.rateLimits ?? true)
       ? new FixedWindowLimiter(CHAT_RATE_LIMIT.max, CHAT_RATE_LIMIT.windowMs)
       : null;
+
+  // ------------------------------------------------------------- M10 wiring ----
+  // One bus, one controller registry and one semaphore per registration, not per module:
+  // the integration suite builds a `fake` app and a `none` app in the same process and
+  // they must not share a concurrency slot.
+  const bus = new RunEventBus();
+  const controllers = new RunControllerRegistry();
+  const semaphore = new RunSemaphore();
+
+  // A loop that is still calling Ollama when the server shuts down would write steps
+  // into a closing pool. Aborting is the polite version of that race.
+  app.addHook('onClose', async () => {
+    controllers.abortAll();
+  });
+
+  interface BackgroundLoopInput {
+    runId: string;
+    userId: string;
+    systemPrompt: string;
+    userPrompt: string;
+    tools: ToolSpec[];
+    maxIterations: number;
+    options: ChatOptions | undefined;
+    logger: FastifyBaseLogger;
+  }
+
+  /**
+   * Starts the agent loop and returns immediately.
+   *
+   * The `void` promise is deliberate and is the reason `POST /model/runs` can answer in
+   * milliseconds while the run takes minutes. Everything that could throw is inside the
+   * `try`, and the `finally` releases the semaphore and publishes the `end` event on
+   * every path — including the ones where the loop itself blew up, because a run that
+   * fails must still stop holding the user's one slot.
+   */
+  function startBackgroundLoop(input: BackgroundLoopInput): void {
+    const controller = controllers.register(input.runId);
+    const recorder = RunRecorder.forNewRun(app.db, input.runId);
+
+    void (async () => {
+      try {
+        await runAgentLoop({
+          db: app.db,
+          provider,
+          recorder,
+          userId: input.userId,
+          model: app.config.OLLAMA_CHAT_MODEL,
+          systemPrompt: input.systemPrompt,
+          userPrompt: input.userPrompt,
+          tools: input.tools,
+          maxIterations: input.maxIterations,
+          options: input.options,
+          signal: controller.signal,
+          onStep: (step) => bus.publish(input.runId, { type: 'step', step }),
+          logger: input.logger,
+        });
+      } catch (error) {
+        // `runAgentLoop` marks the run itself on every path it knows about; this catches
+        // the ones it does not (a dead pool, mostly) so the slot is still freed.
+        input.logger.error({ err: error, runId: input.runId }, 'agent run crashed');
+      } finally {
+        controllers.release(input.runId);
+        semaphore.release(input.userId, input.runId);
+        try {
+          const summary = await loadRunSummary(app.db, input.runId);
+          if (summary) bus.publish(input.runId, { type: 'end', run: summary });
+        } catch {
+          // The listeners will fall back to the heartbeat timing out; nothing else to do.
+        }
+      }
+    })();
+  }
 
   // ------------------------------------------------------------------- health ----
 
@@ -325,6 +429,335 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
         const run = await loadRun(app.db, user.id, request.params.id);
         if (!run) throw notFound(`Run ${request.params.id} not found`);
         return run;
+      },
+    );
+
+    // ------------------------------------------------------ the tool catalog ----
+
+    securedRoutes.get(
+      '/model/tools',
+      { schema: { response: { 200: ToolCatalogResponseSchema } } },
+      async () => ({ tools: catalogDefinitions() }),
+    );
+
+    // ---------------------------------------------------------- creating a run ----
+
+    /**
+     * `POST /model/runs` → `202 {runId}`.
+     *
+     * 202 rather than 200 because the answer genuinely is not ready: an agent run is
+     * several model calls and takes minutes on local hardware. The response is a
+     * receipt, and everything after it arrives over `GET /model/runs/:id/events`.
+     *
+     * For `kind: 'harness'` the handler stops after creating the row. That is not a
+     * missing feature — M11's loop runs in the learner's browser and reports its steps
+     * back, so the server's job is to open a trace and get out of the way. Same table,
+     * same viewer, different owner.
+     */
+    securedRoutes.post(
+      '/model/runs',
+      {
+        schema: {
+          body: CreateRunRequestSchema,
+          response: { 202: CreateRunResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const { user } = authContext(request);
+        const body = request.body;
+
+        if (provider.name === 'none') {
+          throw modelUnavailable(
+            'No model provider is configured on this deployment. Run the app locally with Ollama to use modules 4-6.',
+          );
+        }
+
+        const tools = resolveTools(body.tools);
+        const maxIterations = Math.min(
+          body.maxIterations ?? AGENT_MAX_ITERATIONS_DEFAULT,
+          AGENT_MAX_ITERATIONS_CAP,
+        );
+
+        // Acquire *before* the insert, so a rejected second run leaves no row behind.
+        if (body.kind === 'agent') {
+          const slot = semaphore.tryAcquire(user.id, 'pending');
+          if (!slot.ok) {
+            throw new AppError(
+              409,
+              'RUN_IN_PROGRESS',
+              'You already have an agent run in progress. Local inference is serial, so a second run would only make both slower. Wait for it or cancel it.',
+              { runId: slot.runningRunId },
+            );
+          }
+        }
+
+        let run;
+        try {
+          const input: StartRunInput = {
+            userId: user.id,
+            exerciseId: body.exerciseId ?? null,
+            kind: body.kind,
+            provider: provider.name,
+            model: app.config.OLLAMA_CHAT_MODEL,
+            systemPrompt: body.systemPrompt,
+            userPrompt: body.userPrompt,
+            // The definitions **as sent to the model**, not the selection as posted:
+            // docs/02-schema.md says `agent_runs.tools` is `ToolDefinition[]`, and a
+            // trace that records what the model actually saw is the one worth keeping.
+            tools: toolDefinitions(tools),
+            options: body.options ?? {},
+            maxIterations,
+            requestId: String(request.id),
+          };
+          run = await startRun(app.db, input);
+        } catch (error) {
+          if (body.kind === 'agent') semaphore.release(user.id, 'pending');
+          throw error;
+        }
+
+        if (body.kind === 'agent') {
+          // Swap the placeholder for the real id now that there is one.
+          semaphore.release(user.id, 'pending');
+          semaphore.tryAcquire(user.id, run.id);
+          startBackgroundLoop({
+            runId: run.id,
+            userId: user.id,
+            systemPrompt: body.systemPrompt,
+            userPrompt: body.userPrompt,
+            tools,
+            maxIterations,
+            options: body.options,
+            logger: request.log,
+          });
+        }
+
+        return reply.code(202).send({ runId: run.id, kind: run.kind, status: run.status });
+      },
+    );
+
+    // ----------------------------------------------------------------- events ----
+
+    /**
+     * `GET /model/runs/:id/events` — the trace, replayed then streamed.
+     *
+     * The ordering below is the only subtle thing in this file, and getting it wrong
+     * loses steps in a way that only shows under load:
+     *
+     *   1. **Subscribe first.** Anything the loop publishes from here on is captured.
+     *   2. Read the persisted steps after `Last-Event-ID` and write them out.
+     *   3. Flush whatever arrived while (2) was running, skipping indices (2) already
+     *      sent.
+     *   4. Only now go live.
+     *
+     * Subscribing after the read would leave a window in which a step is neither in the
+     * query result nor in the buffer, and it would be exactly the step that explains
+     * whatever the learner is looking at.
+     */
+    securedRoutes.get(
+      '/model/runs/:id/events',
+      { schema: { params: IdParamsSchema, querystring: EventsQuerySchema } },
+      async (request, reply) => {
+        const { user } = authContext(request);
+        const runId = request.params.id;
+        const owned = await findOwnedRun(app.db, user.id, runId);
+        if (!owned) throw notFound(`Run ${runId} not found`);
+
+        const buffered: RunEvent[] = [];
+        let live = false;
+        let finished = false;
+
+        reply.hijack();
+        const stream = new SseStream(reply.raw);
+
+        const sendStep = (step: RunStep): void => {
+          stream.event('step', step, step.stepIndex);
+        };
+        const sendEnd = (run: RunSummary): void => {
+          if (finished) return;
+          finished = true;
+          // No `id:` on purpose: a reconnect after the end must still ask for everything
+          // after the last *step*, not skip one.
+          stream.event('end', run);
+          stream.end();
+        };
+
+        const unsubscribe = bus.subscribe(runId, (event) => {
+          if (!live) {
+            buffered.push(event);
+            return;
+          }
+          if (event.type === 'step') sendStep(event.step);
+          else sendEnd(event.run);
+        });
+
+        const close = (): void => {
+          unsubscribe();
+          stream.end();
+        };
+        request.raw.on('close', close);
+
+        try {
+          const after = parseLastEventId(
+            request.headers['last-event-id'] ?? request.query.lastEventId,
+          );
+          const replayed = await loadStepsAfter(app.db, runId, after);
+          for (const step of replayed) sendStep(step);
+          let highest =
+            replayed.length > 0 ? (replayed[replayed.length - 1] as RunStep).stepIndex : after;
+
+          live = true;
+          for (const event of buffered) {
+            if (event.type === 'step') {
+              if (event.step.stepIndex > highest) {
+                sendStep(event.step);
+                highest = event.step.stepIndex;
+              }
+            } else {
+              sendEnd(event.run);
+            }
+          }
+          buffered.length = 0;
+
+          // The run may have finished before anyone subscribed, in which case there is
+          // no `end` event coming and the stream would hang until the heartbeat gave up.
+          if (!finished) {
+            const summary = await loadRunSummary(app.db, runId);
+            if (summary && isTerminal(summary.status)) sendEnd(summary);
+          }
+        } catch (error) {
+          request.log.warn({ err: error, runId }, 'SSE replay failed');
+          stream.event('error', { code: 'INTERNAL_ERROR', message: 'Could not read the trace' });
+          close();
+        }
+
+        if (finished) close();
+        return reply;
+      },
+    );
+
+    // ----------------------------------------------------------------- cancel ----
+
+    securedRoutes.post(
+      '/model/runs/:id/cancel',
+      { schema: { params: IdParamsSchema, response: { 200: CancelRunResponseSchema } } },
+      async (request) => {
+        const { user } = authContext(request);
+        const runId = request.params.id;
+        const owned = await findOwnedRun(app.db, user.id, runId);
+        if (!owned) throw notFound(`Run ${runId} not found`);
+
+        // Idempotent: cancelling a finished run is a no-op that reports the truth,
+        // because the button and the run finishing are always in a race.
+        if (isTerminal(owned.status)) {
+          return { runId, status: owned.status };
+        }
+
+        // Two paths, both needed. If the loop is live in this process, aborting really
+        // stops the inference and the loop writes its own terminal row. If it is not —
+        // a harness run, or a process that restarted — the row is marked here.
+        const abortedLive = controllers.abort(runId);
+        await markCancelled(app.db, runId);
+        if (!abortedLive) {
+          const summary = await loadRunSummary(app.db, runId);
+          if (summary) bus.publish(runId, { type: 'end', run: summary });
+        }
+        return { runId, status: 'cancelled' as const };
+      },
+    );
+
+    // ------------------------------------------------- client-reported steps ----
+
+    /**
+     * `POST /model/runs/:id/steps` — the endpoint M11's in-browser harness reports to.
+     *
+     * This is the only place a *client* writes into the trace table, so it is the only
+     * place in the model API with four separate rejections: the run must exist and be
+     * yours (404, not 403 — a 403 confirms the id), it must be a `harness` run (an
+     * `agent` run's trace belongs to the server loop and a client writing into it would
+     * interleave step indices with the loop's own), it must still be running, and the
+     * payload is capped at 20 steps of 8 KB each by the schema. A learner's loop with a
+     * bug in it should cost a 400, not a table.
+     */
+    securedRoutes.post(
+      '/model/runs/:id/steps',
+      {
+        schema: {
+          params: IdParamsSchema,
+          body: ReportStepsRequestSchema,
+          response: { 201: ReportStepsResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const { user } = authContext(request);
+        const runId = request.params.id;
+        const owned = await findOwnedRun(app.db, user.id, runId);
+        if (!owned) throw notFound(`Run ${runId} not found`);
+        if (owned.kind !== 'harness') {
+          throw new AppError(
+            409,
+            'RUN_KIND_MISMATCH',
+            `Run ${runId} is a "${owned.kind}" run; only a harness run accepts client-reported steps.`,
+          );
+        }
+        if (isTerminal(owned.status)) {
+          throw new AppError(409, 'RUN_NOT_RUNNING', `Run ${runId} has already finished.`);
+        }
+
+        const recorder = await RunRecorder.forExistingRun(app.db, runId);
+        const written: RunStep[] = [];
+        const totals = {
+          iterations: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          latencyMs: 0,
+          toolCalls: 0,
+          parseFailures: 0,
+        };
+        let finalOutput: string | null = null;
+
+        for (const step of request.body.steps) {
+          const row = await recorder.step({
+            kind: step.kind,
+            iteration: step.iteration,
+            content: step.content ?? null,
+            toolName: step.toolName ?? null,
+            toolArgs: step.toolArgs ?? null,
+            toolArgsRaw: step.toolArgsRaw ?? null,
+            parseOk: step.parseOk ?? null,
+            toolResult: step.toolResult ?? null,
+            isError: step.isError,
+            latencyMs: step.latencyMs ?? null,
+            promptTokens: step.promptTokens ?? null,
+            completionTokens: step.completionTokens ?? null,
+            raw: { reportedBy: 'client' },
+          });
+          const runStep = toRunStep(row);
+          written.push(runStep);
+          bus.publish(runId, { type: 'step', step: runStep });
+
+          if (step.kind === 'model_call') {
+            totals.iterations += 1;
+            totals.promptTokens += step.promptTokens ?? 0;
+            totals.completionTokens += step.completionTokens ?? 0;
+            totals.latencyMs += step.latencyMs ?? 0;
+          }
+          if (step.kind === 'tool_call') {
+            totals.toolCalls += 1;
+            if (step.parseOk === false) totals.parseFailures += 1;
+          }
+          if (step.kind === 'final') finalOutput = step.content ?? '';
+        }
+
+        await recorder.accumulate(totals);
+
+        // A `final` step closes the run. Without this the harness run would stay
+        // `running` forever and its SSE stream would never terminate.
+        if (finalOutput !== null && (await markCompleted(app.db, runId, finalOutput))) {
+          const summary = await loadRunSummary(app.db, runId);
+          if (summary) bus.publish(runId, { type: 'end', run: summary });
+        }
+
+        return reply.code(201).send({ steps: written });
       },
     );
   });

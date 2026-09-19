@@ -1,5 +1,5 @@
 import type { RunDetail, RunStep, RunSummary } from '@lab/shared';
-import { and, asc, desc, eq, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 
 import type { Db } from '../db/client.js';
 import { agentRuns, agentRunSteps } from '../db/schema.js';
@@ -110,13 +110,28 @@ export interface FinishRunInput {
 }
 
 /**
+ * The slice of `RunRecorder` the agent loop actually needs.
+ *
+ * Declared so `agentLoop.ts` depends on two methods rather than on a class that owns a
+ * database handle. The unit suite then drives every branch of the loop with an in-memory
+ * writer that records the exact sequence of step kinds -- which is the assertion those
+ * tests exist to make -- without a Postgres anywhere near them. The integration suite
+ * passes the real `RunRecorder` and checks the rows.
+ */
+export interface StepWriter {
+  readonly runId: string;
+  step(input: StepInput): Promise<StepRow>;
+  finish(input: FinishRunInput): Promise<void>;
+}
+
+/**
  * A run being written, with its own step counter.
  *
  * Constructed by `forNewRun` (the `/model/chat` case) or `forExistingRun` (a call
  * appended to a run the browser-side harness already opened in M11), and the difference
  * between the two is one `select max(step_index)`.
  */
-export class RunRecorder {
+export class RunRecorder implements StepWriter {
   private stepIndex: number;
 
   private constructor(
@@ -337,4 +352,77 @@ export async function listRuns(
       ? (page[page.length - 1]?.startedAt.toISOString() ?? null)
       : null;
   return { runs: page.map(toRunSummary), nextCursor };
+}
+
+// ------------------------------------------------------- reading, for SSE (M10) ----
+
+/**
+ * Steps after `afterIndex`, in order. The whole of `Last-Event-ID` resumption is this
+ * one `>` predicate: the SSE `id:` of a step event *is* its `step_index`, so a
+ * reconnecting browser tells the server exactly where it got to and gets the tail,
+ * rather than a time window that can duplicate or drop rows at the boundary.
+ *
+ * Pass `-1` for "from the beginning", which is why the parameter is an index and not an
+ * optional cursor: `0` is a real step.
+ */
+export async function loadStepsAfter(
+  db: Db,
+  runId: string,
+  afterIndex: number,
+  limit = 500,
+): Promise<RunStep[]> {
+  const rows = await db
+    .select()
+    .from(agentRunSteps)
+    .where(and(eq(agentRunSteps.runId, runId), gt(agentRunSteps.stepIndex, afterIndex)))
+    .orderBy(asc(agentRunSteps.stepIndex))
+    .limit(limit);
+  return rows.map(toRunStep);
+}
+
+/** The run row without its steps, for the `end` event and the cancel route. */
+export async function loadRunSummary(db: Db, runId: string): Promise<RunSummary | null> {
+  const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+  return row ? toRunSummary(row) : null;
+}
+
+export const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'max_iterations'] as const;
+
+export const isTerminal = (status: string): boolean =>
+  (TERMINAL_STATUSES as readonly string[]).includes(status);
+
+/**
+ * Marks a run cancelled **only if it is still running**.
+ *
+ * The guard is the whole point. Cancel races the loop: a run that completed a
+ * millisecond before the click must stay `completed`, because overwriting a real answer
+ * with "cancelled" would make the trace lie about what happened. Returns whether the
+ * update actually applied.
+ */
+export async function markCancelled(db: Db, runId: string): Promise<boolean> {
+  const updated = await db
+    .update(agentRuns)
+    .set({
+      status: 'cancelled',
+      errorCode: 'RUN_CANCELLED',
+      errorMessage: 'Cancelled by the user',
+      finishedAt: new Date(),
+    })
+    .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, 'running')))
+    .returning({ id: agentRuns.id });
+  return updated.length > 0;
+}
+
+/** Closes a run the client-side harness finished (M11's `final` step). Same race guard. */
+export async function markCompleted(
+  db: Db,
+  runId: string,
+  finalOutput: string | null,
+): Promise<boolean> {
+  const updated = await db
+    .update(agentRuns)
+    .set({ status: 'completed', finalOutput, finishedAt: new Date() })
+    .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, 'running')))
+    .returning({ id: agentRuns.id });
+  return updated.length > 0;
 }

@@ -2,6 +2,7 @@ export { HealthCheckSchema, HealthResponseSchema } from './health.js';
 export type { HealthCheck, HealthResponse } from './health.js';
 
 export {
+  AgentConfigSchema,
   AttentionConfigSchema,
   ChoiceCorrectSchema,
   CompletionRuleSchema,
@@ -25,6 +26,9 @@ export {
   TokenizerTabConfigSchema,
 } from './content.js';
 export type {
+  AgentCheck,
+  AgentConfig,
+  AgentTask,
   AttentionConfig,
   CompletionRule,
   EmbeddingsConfig,
@@ -32,6 +36,7 @@ export type {
   ExerciseKind,
   ExercisesFile,
   LessonFrontmatter,
+  MockToolTemplate,
   ModuleFile,
   ParsedLessonFile,
   PrecomputedEmbeddings,

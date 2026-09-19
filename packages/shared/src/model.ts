@@ -317,3 +317,242 @@ export const RunListResponseSchema = z.object({
   nextCursor: IsoTimestampSchema.nullable(),
 });
 export type RunListResponse = z.infer<typeof RunListResponseSchema>;
+
+// ------------------------------------------------------- HTTP: agent runs (M10) ----
+
+/**
+ * The server-side tool catalog, named here because three parties have to agree on the
+ * spelling: the API (`apps/api/src/model/tools/`), the exercise config in
+ * `content/modules/05-agents/exercises.json`, and the tool picker in the browser.
+ *
+ * The list is an allow-list in the strongest sense — `POST /model/runs` will not accept a
+ * catalog name that is not in this enum, so a learner cannot ask the server to run
+ * something by guessing a name. Anything else they want has to be a **mock tool**, which
+ * is data, not code (see `MockToolDefinitionSchema`).
+ */
+export const TOOL_CATALOG_NAMES = [
+  'calculator',
+  'get_current_time',
+  'unit_convert',
+  'lookup_glossary',
+  'fake_weather',
+  /**
+   * The deliberate failure. It always throws, and it exists so Module 5's
+   * `observe-failure` task can show what the loop does with a tool that breaks without
+   * anyone having to break a working one.
+   */
+  'flaky_service',
+] as const;
+export const CatalogToolNameSchema = z.enum(TOOL_CATALOG_NAMES);
+export type CatalogToolName = z.infer<typeof CatalogToolNameSchema>;
+
+/**
+ * UTF-8 byte length, hand-rolled.
+ *
+ * `Buffer` is Node-only and `packages/shared` is imported by the browser bundle; a
+ * `TextEncoder` allocation per validated object is wasteful when all anyone wants is a
+ * count. Surrogate pairs are counted once, as four bytes, which is what they cost.
+ */
+export function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/** docs/01-architecture.md → "Guardrails": default 8, hard cap 15. */
+export const AGENT_MAX_ITERATIONS_DEFAULT = 8;
+export const AGENT_MAX_ITERATIONS_CAP = 15;
+/** Total wall clock for one run, and the ceiling on one tool execution. */
+export const AGENT_WALL_CLOCK_MS = 5 * 60 * 1000;
+export const TOOL_TIMEOUT_MS = 10_000;
+/** Mock tools are carried in the run row and sent to the model; both want a ceiling. */
+export const AGENT_MAX_MOCK_TOOLS = 5;
+export const MOCK_TOOL_RESPONSE_MAX_BYTES = 4096;
+
+/**
+ * A learner-defined tool: a name, a description, a JSON Schema and a canned answer.
+ *
+ * **Nothing here is executed.** `response` is returned verbatim, and `responses` is a
+ * small lookup table matched on a subset of the arguments — enough to make a mock tool
+ * feel alive ("order A is shipped, order B is pending") without the server ever running
+ * a line of learner code. That constraint is the whole design: docs/01-architecture.md
+ * says tools are never learner-supplied code, and a static table is how you teach tool
+ * schemas and traces while keeping that true.
+ */
+export const MockToolResponseRuleSchema = z
+  .object({
+    /** Matched by shallow equality against the parsed arguments; first rule wins. */
+    when: z.record(z.unknown()),
+    response: z.unknown(),
+  })
+  .strict();
+export type MockToolResponseRule = z.infer<typeof MockToolResponseRuleSchema>;
+
+export const MockToolDefinitionSchema = z
+  .object({
+    // Same shape most providers require of a function name, enforced here so an invalid
+    // name is a 400 from this app rather than a 400 from Ollama three layers down.
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(
+        /^[a-zA-Z][a-zA-Z0-9_]*$/,
+        'must start with a letter and contain only letters, digits and underscores',
+      ),
+    description: z.string().min(1).max(1024),
+    parameters: JsonSchemaObjectSchema,
+    /** The default answer, used when no rule in `responses` matches. */
+    response: z.unknown(),
+    responses: z.array(MockToolResponseRuleSchema).max(10).optional(),
+  })
+  .strict()
+  .superRefine((tool, ctx) => {
+    const size = utf8ByteLength(JSON.stringify(tool.response ?? null));
+    if (size > MOCK_TOOL_RESPONSE_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['response'],
+        message: `must serialise to at most ${MOCK_TOOL_RESPONSE_MAX_BYTES} bytes (got ${size})`,
+      });
+    }
+  });
+export type MockToolDefinition = z.infer<typeof MockToolDefinitionSchema>;
+
+export const RunToolSelectionSchema = z
+  .object({
+    catalog: z.array(CatalogToolNameSchema).max(TOOL_CATALOG_NAMES.length).default([]),
+    mock: z.array(MockToolDefinitionSchema).max(AGENT_MAX_MOCK_TOOLS).default([]),
+  })
+  .strict();
+export type RunToolSelection = z.infer<typeof RunToolSelectionSchema>;
+
+/**
+ * `POST /api/v1/model/runs` → `202 {runId}`.
+ *
+ * `kind` decides who drives the loop. `agent` starts the server-side loop in the
+ * background and the browser watches it over SSE; `harness` only opens the run so M11's
+ * in-browser Web Worker can report its own steps against it. Same row, same trace
+ * viewer, two very different owners — which is exactly the point Module 6 makes.
+ */
+export const CreateRunRequestSchema = z
+  .object({
+    exerciseId: UuidSchema.optional(),
+    kind: z.enum(['agent', 'harness']),
+    systemPrompt: z.string().max(CHAT_MAX_CONTENT_CHARS).default(''),
+    userPrompt: z.string().min(1).max(CHAT_MAX_CONTENT_CHARS),
+    tools: RunToolSelectionSchema.default({ catalog: [], mock: [] }),
+    maxIterations: z.number().int().min(1).max(AGENT_MAX_ITERATIONS_CAP).optional(),
+    options: ChatOptionsSchema.optional(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    const names = [...body.tools.catalog, ...body.tools.mock.map((tool) => tool.name)];
+    if (names.length > CHAT_MAX_TOOLS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tools'],
+        message: `at most ${CHAT_MAX_TOOLS} tools may be attached to one run (got ${names.length})`,
+      });
+    }
+    const seen = new Set<string>();
+    for (const name of names) {
+      if (seen.has(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['tools'],
+          message: `duplicate tool name "${name}": a mock tool may not shadow a catalog tool`,
+        });
+      }
+      seen.add(name);
+    }
+  });
+export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;
+
+export const CreateRunResponseSchema = z.object({
+  runId: UuidSchema,
+  kind: RunKindSchema,
+  status: RunStatusSchema,
+});
+export type CreateRunResponse = z.infer<typeof CreateRunResponseSchema>;
+
+export const CancelRunResponseSchema = z.object({
+  runId: UuidSchema,
+  status: RunStatusSchema,
+});
+export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
+
+/**
+ * `POST /api/v1/model/runs/:id/steps` — steps reported by a client-side loop (M11).
+ *
+ * Hard limits everywhere, because this is the one endpoint where the *client* decides
+ * what goes into the trace table. A learner's harness with a bug in its own loop must
+ * cost a 400, not a table full of rows.
+ */
+export const REPORTED_STEPS_MAX = 20;
+export const REPORTED_STEP_MAX_BYTES = 8 * 1024;
+
+export const ReportedStepSchema = z
+  .object({
+    kind: RunStepKindSchema,
+    iteration: z.number().int().min(0).max(AGENT_MAX_ITERATIONS_CAP),
+    content: z.string().max(CHAT_MAX_CONTENT_CHARS).nullish(),
+    toolName: z.string().max(64).nullish(),
+    toolArgs: z.unknown().optional(),
+    toolArgsRaw: z.string().max(4096).nullish(),
+    parseOk: z.boolean().nullish(),
+    toolResult: z.unknown().optional(),
+    isError: z.boolean().default(false),
+    latencyMs: z.number().int().min(0).max(AGENT_WALL_CLOCK_MS).nullish(),
+    promptTokens: z.number().int().min(0).max(1_000_000).nullish(),
+    completionTokens: z.number().int().min(0).max(1_000_000).nullish(),
+  })
+  .strict()
+  .superRefine((step, ctx) => {
+    const size = utf8ByteLength(JSON.stringify(step));
+    if (size > REPORTED_STEP_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `a reported step must serialise to at most ${REPORTED_STEP_MAX_BYTES} bytes (got ${size})`,
+      });
+    }
+  });
+export type ReportedStep = z.infer<typeof ReportedStepSchema>;
+
+export const ReportStepsRequestSchema = z
+  .object({ steps: z.array(ReportedStepSchema).min(1).max(REPORTED_STEPS_MAX) })
+  .strict();
+export type ReportStepsRequest = z.infer<typeof ReportStepsRequestSchema>;
+
+export const ReportStepsResponseSchema = z.object({ steps: z.array(RunStepSchema) });
+export type ReportStepsResponse = z.infer<typeof ReportStepsResponseSchema>;
+
+/**
+ * `GET /api/v1/model/tools` — the catalog as the browser's tool picker needs it.
+ *
+ * The descriptions and JSON Schemas live on the server (they are prompt text and a
+ * contract, not presentation), so the picker fetches them rather than duplicating them
+ * in the exercise config. The config chooses *which* names to offer; this says what they
+ * are.
+ */
+export const ToolCatalogResponseSchema = z.object({ tools: z.array(ToolDefinitionSchema) });
+export type ToolCatalogResponse = z.infer<typeof ToolCatalogResponseSchema>;
+
+/**
+ * The two SSE event names `GET /model/runs/:id/events` emits.
+ *
+ * `step` carries a `RunStep` and its SSE `id:` is the step index, which is what makes
+ * `Last-Event-ID` resumption exact rather than time-based. `end` carries the final
+ * `RunSummary` and deliberately has **no** id, so a reconnect after it would still ask
+ * for everything after the last *step* rather than skipping one.
+ */
+export const RunStepEventSchema = RunStepSchema;
+export const RunEndEventSchema = RunSummarySchema;

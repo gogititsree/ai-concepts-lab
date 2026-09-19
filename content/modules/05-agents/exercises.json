@@ -11,41 +11,79 @@
         "get_current_time",
         "unit_convert",
         "lookup_glossary",
-        "fake_weather"
+        "fake_weather",
+        "flaky_service"
       ],
       "allowMockTools": true,
       "defaultMaxIterations": 6,
+      "defaults": {
+        "systemPrompt": "You are a careful assistant with tools. Before you answer, decide whether a tool can give you a fact you do not have. Use the calculator for EVERY calculation, even an easy one. Use get_current_time before any statement about the date or time. Call one tool at a time, wait for its result, then either call another tool or give your final answer. When you have the answer, state it plainly and stop calling tools.",
+        "userPrompt": "A deposit of 2500 earns 7% interest compounded annually. What is the balance after 8 years? Give the number to two decimal places.",
+        "tools": ["calculator"]
+      },
+      "mockToolTemplate": {
+        "name": "get_order_status",
+        "description": "Look up the delivery status of a customer order by its id. Use this whenever someone asks where an order is. Example: {\"order_id\": \"A-1001\"}.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "order_id": {
+              "type": "string",
+              "description": "The order reference, e.g. \"A-1001\"."
+            }
+          },
+          "required": ["order_id"],
+          "additionalProperties": false
+        },
+        "response": { "status": "shipped", "carrier": "Fictional Post", "eta_days": 2 }
+      },
+      "reflectionMd": "Look back at the trace of your failing run. Which step first went wrong — the model's choice of tool, the arguments it sent, or the tool itself? Write one line naming the step, and one line saying which guardrail caught it.",
       "tasks": [
         {
           "id": "compound-interest",
           "label": "Get a correct compound-interest answer via the calculator tool",
+          "hintMd": "Tick `calculator`, then run the default question. If the model answers from memory instead of calling the tool, strengthen the system prompt: say *every* calculation goes through the calculator, and that it must not do arithmetic in its head. A small model needs to be told, not hinted at.",
+          "systemPrompt": "You are a careful assistant with tools. Use the calculator tool for EVERY calculation, including ones that look easy — never do arithmetic in your head. Send one expression at a time, wait for the result, then give a plain final answer.",
+          "userPrompt": "A deposit of 2500 earns 7% interest compounded annually. What is the balance after 8 years? Give the number to two decimal places.",
+          "tools": ["calculator"],
+          "maxIterations": 6,
           "check": {
+            "type": "numeric-answer",
             "toolCalled": "calculator",
-            "answerWithinPercent": 1
+            "expected": 4295.4654,
+            "withinPercent": 1
           }
         },
         {
           "id": "must-check-time",
-          "label": "Make the agent call get_current_time before answering",
-          "check": {
-            "toolCallBeforeFinal": "get_current_time"
-          }
+          "label": "Make the agent call get_current_time before it answers \"what day is it?\"",
+          "hintMd": "The model has a training cut-off and no clock, so it will happily invent a date. The fix is in the system prompt: state that it does not know the date, and that it must call the tool first. Then read the trace — the `tool_call` step has to come before the `final` step for this to pass.",
+          "systemPrompt": "You are an assistant with tools. You do NOT know today's date and must never guess it. Before answering anything about the date, the day of the week or the time, call get_current_time and use its result.",
+          "userPrompt": "What day of the week is it today in London?",
+          "tools": ["get_current_time"],
+          "maxIterations": 4,
+          "check": { "type": "tool-before-final", "toolName": "get_current_time" }
         },
         {
           "id": "mock-tool",
-          "label": "Define a mock tool and get the agent to use it",
-          "check": {
-            "mockToolCalled": true,
-            "parseOk": true
-          }
+          "label": "Define a mock tool and get the agent to call it",
+          "hintMd": "Open \"add mock tool\". The description is the part that matters: it is prompt text, not documentation. Say what the tool returns and when to reach for it, and give one example argument. Then ask a question only that tool can answer.",
+          "systemPrompt": "You are a customer-service assistant. You have no knowledge of order data yourself: to answer anything about an order you must call the tool that looks it up, then report exactly what it returns.",
+          "userPrompt": "Where is my order A-1001?",
+          "tools": [],
+          "addsMockTool": true,
+          "maxIterations": 4,
+          "check": { "type": "mock-tool-called" }
         },
         {
           "id": "observe-failure",
-          "label": "Run the sabotage scenario and write a one-line reflection",
-          "check": {
-            "scenario": "sabotage",
-            "reflection": true
-          }
+          "label": "Watch a tool fail, then write one line about which guardrail caught it",
+          "hintMd": "Tick `flaky_service` — it always fails, on purpose. Run it and read the trace: the `tool_result` step is red, the error goes back to the model as an observation, and the run still completes. That is the behaviour to understand; the reflection box appears once two tasks are done.",
+          "systemPrompt": "You are an assistant with tools. If a tool fails, do not retry it more than once: explain to the user what failed and stop.",
+          "userPrompt": "Use the flaky_service tool to look up the status of ticket 42, then tell me what happened.",
+          "tools": ["flaky_service"],
+          "maxIterations": 4,
+          "check": { "type": "error-observed", "requiresReflection": true }
         }
       ]
     },
