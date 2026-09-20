@@ -232,6 +232,12 @@ jobs:
   security:
     name: Dependency audit and secret scan
     runs-on: ubuntu-latest
+    # gitleaks lists the pull request's commits to decide what to scan, which the
+    # workflow-level `contents: read` does not cover. Without this the step dies on a
+    # 403 "Resource not accessible by integration" that reads like a leak but is not one.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
