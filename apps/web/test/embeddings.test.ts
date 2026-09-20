@@ -52,7 +52,14 @@ describe('the shipped fallback file', () => {
   });
 });
 
-describe('PCA projection', () => {
+/**
+ * 30 s, not the 5 s default. These run the real `pca` over the shipped 768-dimension
+ * embeddings, which means a 768x768 covariance matrix and power iteration with deflation
+ * -- and the first test does it twice to prove determinism. That is a few seconds on a
+ * developer machine and over ten on a two-core CI runner, where it failed on the first
+ * pipeline run. The computation is the point of the test, so the budget moves, not the work.
+ */
+describe('PCA projection', { timeout: 30_000 }, () => {
   const data = words.map((word) => PRECOMPUTED_EMBEDDINGS.vectors[word] as number[]);
 
   it('is deterministic: the same vectors give byte-identical coordinates', () => {
