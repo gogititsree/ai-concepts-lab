@@ -48,6 +48,42 @@ const STATUS_CODES: Record<number, string> = {
   429: 'RATE_LIMITED',
 };
 
+/**
+ * Node's socket-level codes for "nothing is listening / it went away". postgres.js
+ * surfaces a refused connection as an `AggregateError` carrying `code: 'ECONNREFUSED'`
+ * (one entry per address it tried), and drizzle wraps whatever it caught in a
+ * `DrizzleQueryError` with the original on `cause` — so the check walks the cause chain
+ * rather than looking at the top-level error only.
+ */
+const CONNECTION_FAILURE_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'EPIPE',
+  'CONNECTION_CLOSED',
+  'CONNECTION_ENDED',
+  'CONNECT_TIMEOUT',
+]);
+
+function isConnectionFailure(error: unknown, depth = 0): boolean {
+  // Cause chains are short; the bound stops a self-referential one from hanging a request.
+  if (depth > 5 || typeof error !== 'object' || error === null) return false;
+
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string' && CONNECTION_FAILURE_CODES.has(code)) return true;
+
+  // AggregateError from a multi-address connect: any leg refusing is the same outage.
+  const errors = (error as { errors?: unknown }).errors;
+  if (Array.isArray(errors) && errors.some((entry) => isConnectionFailure(entry, depth + 1))) {
+    return true;
+  }
+
+  return isConnectionFailure((error as { cause?: unknown }).cause, depth + 1);
+}
+
 /** The opaque 500 every unexpected failure collapses to. Frozen: callers only read it. */
 const internalError: MappedError = Object.freeze({
   statusCode: 500,
@@ -102,6 +138,28 @@ export function mapError(error: unknown): MappedError {
   // The *response* did not match its schema: always a server bug, and the details would
   // describe internal structure, so the client gets nothing.
   if (isResponseSerializationError(error)) return internalError;
+
+  // The database is unreachable. Worth its own code rather than the opaque 500: this is
+  // the single most common thing to go wrong in development (`pnpm db:up` not run, or
+  // Docker restarted and the container did not come back), and "Internal server error"
+  // sends you reading application code for a fault that is not in it.
+  //
+  // It is a dependency failure, not a bug, so 503 — and the message names the fix. The
+  // same reasoning as `MODEL_UNAVAILABLE`, which already does this for Ollama.
+  if (isConnectionFailure(error)) {
+    return {
+      statusCode: 503,
+      body: {
+        error: {
+          code: 'DATABASE_UNAVAILABLE',
+          message:
+            'The database is not reachable. In development, start it with `pnpm db:up`; see docs/runbooks/db-migration-failed.md if it is running.',
+        },
+      },
+      // Not "unexpected": it is logged, but it is an outage, not a defect to chase.
+      isUnexpected: false,
+    };
+  }
 
   const status = (error as FastifyError | undefined)?.statusCode;
   if (typeof status === 'number' && status >= 400 && status < 500) {

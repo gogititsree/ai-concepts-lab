@@ -136,3 +136,59 @@ describe('the error handler in a built app', () => {
     expect(res.json()).toMatchObject({ error: { code: 'UNAUTHENTICATED' } });
   });
 });
+
+describe('a database outage is reported as one, not as a bug', () => {
+  /**
+   * The failure a developer actually hits: `pnpm db:up` was never run, or Docker
+   * restarted and the container did not come back. Before this mapping the whole
+   * curriculum answered "Internal server error" with a 500, which reads like a defect in
+   * the application and sends you reading the wrong code. The same reasoning that gives
+   * Ollama its own `MODEL_UNAVAILABLE`.
+   */
+  const expectUnavailable = (error: unknown) => {
+    const mapped = mapError(error);
+    expect(mapped.statusCode).toBe(503);
+    expect(mapped.body.error.code).toBe('DATABASE_UNAVAILABLE');
+    expect(mapped.body.error.message).toContain('pnpm db:up');
+    // An outage is logged, but it is not a defect to go chasing.
+    expect(mapped.isUnexpected).toBe(false);
+  };
+
+  it('maps a bare ECONNREFUSED', () => {
+    expectUnavailable(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+  });
+
+  it('maps the AggregateError postgres.js actually throws', () => {
+    // Observed shape: one leg per address it tried, `code` on the aggregate itself.
+    const aggregate = Object.assign(
+      new AggregateError([
+        Object.assign(new Error('connect ECONNREFUSED ::1:5432'), {
+          code: 'ECONNREFUSED',
+        }),
+      ]),
+      { code: 'ECONNREFUSED' },
+    );
+    expectUnavailable(aggregate);
+  });
+
+  it('unwraps the DrizzleQueryError that actually reaches the handler', () => {
+    // Drizzle wraps the driver's error, so the top level carries no socket code at all.
+    const wrapped = Object.assign(new Error('Failed query: select ...'), {
+      name: 'DrizzleQueryError',
+      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    });
+    expectUnavailable(wrapped);
+  });
+
+  it('does not mistake an ordinary bug for an outage', () => {
+    expect(mapError(new Error('cannot read properties of undefined')).body.error.code).toBe(
+      'INTERNAL_ERROR',
+    );
+  });
+
+  it('terminates on a self-referential cause chain', () => {
+    const looping: { cause?: unknown } = {};
+    looping.cause = looping;
+    expect(mapError(looping).body.error.code).toBe('INTERNAL_ERROR');
+  });
+});
