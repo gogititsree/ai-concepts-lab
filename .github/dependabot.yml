@@ -18,6 +18,24 @@ updates:
     commit-message:
       prefix: deps
       prefix-development: deps-dev
+    # Major versions are NOT proposed automatically.
+    #
+    # They arrived as individual PRs and immediately proved the point: TypeScript 7,
+    # Vitest 5 and Zod 4 all opened at once and all failed CI, then sat there. A stack of
+    # permanently-red PRs is not a backlog, it is wallpaper -- and it buries the green
+    # minor-bump PR that actually wanted merging.
+    #
+    # A major is a migration with a changelog to read, not a weekly interrupt, so it is
+    # pulled deliberately (`pnpm outdated`) rather than pushed.
+    #
+    # The tradeoff, stated plainly: this also suppresses a *security* fix that only
+    # exists in a new major. The compensating control is the `security` job in ci.yml,
+    # which runs `pnpm audit --audit-level=high` on every pull request and fails the
+    # build. That is exactly how the @fastify/static path-traversal advisory was caught,
+    # and its fix was an 8 -> 10 jump done by hand the same day.
+    ignore:
+      - dependency-name: '*'
+        update-types: [version-update:semver-major]
     groups:
       # Everything that ends up in the running image. Majors are excluded so a breaking
       # Fastify or React release arrives as its own PR with its own reading.
@@ -56,6 +74,24 @@ updates:
     commit-message:
       prefix: deps
       prefix-development: deps-dev
+    # Major versions are NOT proposed automatically.
+    #
+    # They arrived as individual PRs and immediately proved the point: TypeScript 7,
+    # Vitest 5 and Zod 4 all opened at once and all failed CI, then sat there. A stack of
+    # permanently-red PRs is not a backlog, it is wallpaper -- and it buries the green
+    # minor-bump PR that actually wanted merging.
+    #
+    # A major is a migration with a changelog to read, not a weekly interrupt, so it is
+    # pulled deliberately (`pnpm outdated`) rather than pushed.
+    #
+    # The tradeoff, stated plainly: this also suppresses a *security* fix that only
+    # exists in a new major. The compensating control is the `security` job in ci.yml,
+    # which runs `pnpm audit --audit-level=high` on every pull request and fails the
+    # build. That is exactly how the @fastify/static path-traversal advisory was caught,
+    # and its fix was an 8 -> 10 jump done by hand the same day.
+    ignore:
+      - dependency-name: '*'
+        update-types: [version-update:semver-major]
     groups:
       production:
         applies-to: version-updates
