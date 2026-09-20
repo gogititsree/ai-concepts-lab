@@ -52,13 +52,21 @@ export function Readout({
   label,
   value,
   hint,
+  testId,
 }: {
   label: string;
   value: ReactNode;
   hint?: string;
+  /**
+   * Optional hook for the Playwright E2E. The label and the value are two sibling
+   * paragraphs with no programmatic association between them, so there is no accessible
+   * name a test could use to ask for "the value next to Accuracy"; rather than teach the
+   * test to walk the DOM, the one readout an assertion depends on names itself.
+   */
+  testId?: string;
 }) {
   return (
-    <div title={hint}>
+    <div title={hint} data-testid={testId}>
       <p className="eyebrow">{label}</p>
       <p className="readout text-lg leading-tight font-medium">{value}</p>
     </div>

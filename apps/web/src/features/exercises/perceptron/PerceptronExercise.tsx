@@ -90,6 +90,7 @@ export function PerceptronExercise({ exercise }: ExerciseComponentProps) {
               label="Accuracy"
               value={`${(state.accuracy * 100).toFixed(1)} %`}
               hint="Fraction of the current points classified correctly"
+              testId="accuracy"
             />
             <Readout label="Epochs" value={state.epochs} hint="Full passes over this dataset" />
             <Readout label="Steps" value={state.steps} hint="Single-example updates" />

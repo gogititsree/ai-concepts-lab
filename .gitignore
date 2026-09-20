@@ -12,3 +12,6 @@ test-results/
 # Local editor/OS noise
 .idea/
 .vscode/
+
+# The api coverage gate writes here (see apps/api/vitest.coverage.config.ts).
+coverage-gate/

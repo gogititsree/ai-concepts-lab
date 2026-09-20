@@ -1,0 +1,98 @@
+version: 2
+
+# Grouped, weekly, and capped. A solo maintainer who gets fifteen individual PRs every
+# Monday stops reading them, which is strictly worse than reviewing three. The split is by
+# blast radius rather than by ecosystem: something that ships to production is reviewed
+# with more care than something that only runs in CI.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+      prefix-development: deps-dev
+    groups:
+      # Everything that ends up in the running image. Majors are excluded so a breaking
+      # Fastify or React release arrives as its own PR with its own reading.
+      production:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [minor, patch]
+      # Linters, TypeScript, Vitest, Playwright, Vite. A single PR per week; if it is
+      # green, it is almost always mergeable as-is.
+      dev-tooling:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [minor, patch]
+      # Security fixes are never grouped with routine churn: they should be small,
+      # obvious and mergeable on their own.
+      security:
+        applies-to: security-updates
+        patterns: ['*']
+
+  # pnpm workspaces: the lockfile is at the root, but Dependabot still needs each
+  # package's manifest listed to bump the ranges written in it.
+  - package-ecosystem: npm
+    directories:
+      - /apps/api
+      - /apps/web
+      - /packages/nn-core
+      - /packages/shared
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+      prefix-development: deps-dev
+    groups:
+      production:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [minor, patch]
+      dev-tooling:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ['*']
+
+  # Actions pinned to major tags still move underneath you; this is how the bump becomes
+  # a reviewable commit instead of a surprise.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels: [ci]
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ['*']
+
+  # The base image in docker/Dockerfile (node:24-alpine): a monthly nudge is enough, and
+  # it is the one update that can silently change the runtime under the app.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    labels: [ci]
+    commit-message:
+      prefix: ci

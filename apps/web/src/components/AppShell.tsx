@@ -61,8 +61,7 @@ export function AppShell() {
       <footer className="border-rule mt-8 border-t">
         <div className="text-muted mx-auto w-full max-w-6xl px-4 py-5 text-xs">
           <p className="readout">
-            Milestone M3 &middot; content loaded from <code>content/modules</code> at build time
-            &middot; progress kept in this browser only
+            Curriculum served from the API &middot; progress saved to your account
           </p>
         </div>
       </footer>

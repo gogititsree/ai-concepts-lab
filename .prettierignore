@@ -13,3 +13,4 @@ apps/api/test/fixtures/
 # drizzle-kit owns these: it rewrites them on every `db:generate`, and the .sql files are
 # applied by checksum, so reformatting them would churn diffs or invalidate migrations.
 apps/api/src/db/migrations/
+coverage-gate/

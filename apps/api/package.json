@@ -13,6 +13,7 @@
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:coverage:gate": "vitest run --config vitest.coverage.config.ts --coverage",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file-if-exists=../../.env src/db/migrate.ts",
     "db:seed": "tsx --env-file-if-exists=../../.env src/db/seed.ts",

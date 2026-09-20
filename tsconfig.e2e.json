@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    // Playwright loads these files with its own bundler-style resolver, so extensionless
+    // relative imports (../apps/api/src/auth/totp) must resolve the same way here.
+    "moduleResolution": "bundler",
+    // `scripts/*.mjs` are plain Node ESM; the config imports one of them and gets its
+    // types by inference rather than from a hand-written .d.ts.
+    "allowJs": true,
+    "checkJs": false,
+    "types": ["node"],
+    // The spec reads the browser's DOM through `evaluateAll`, which is typed against lib.dom.
+    "lib": ["ES2022", "DOM"],
+    // `exactOptionalPropertyTypes` is off repo-wide; declaration output is meaningless here.
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts", "scripts/**/*.mjs"]
+}
