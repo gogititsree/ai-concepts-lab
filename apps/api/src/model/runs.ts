@@ -1,7 +1,7 @@
 import type { RunDetail, RunStep, RunSummary } from '@lab/shared';
 import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 
-import type { Db } from '../db/client.js';
+import type { Db, DbLike } from '../db/client.js';
 import { agentRuns, agentRunSteps } from '../db/schema.js';
 
 /**
@@ -83,6 +83,12 @@ export async function startRun(db: Db, input: StartRunInput): Promise<RunRow> {
 export interface StepInput {
   kind: 'model_call' | 'tool_call' | 'tool_result' | 'final' | 'error';
   iteration: number;
+  /**
+   * The client's idempotency key, for steps that came in over
+   * `POST /model/runs/:id/steps`. Absent — and therefore NULL — for every step the
+   * server writes itself. See `appendReportedStep`.
+   */
+  clientStepId?: string | null;
   content?: string | null;
   toolName?: string | null;
   toolArgs?: unknown;
@@ -124,58 +130,62 @@ export interface StepWriter {
   finish(input: FinishRunInput): Promise<void>;
 }
 
+/** The row as it goes into `agent_run_steps`, in one place so replay can re-derive it. */
+function stepValues(runId: string, stepIndex: number, input: StepInput) {
+  return {
+    runId,
+    stepIndex,
+    clientStepId: input.clientStepId ?? null,
+    kind: input.kind,
+    iteration: input.iteration,
+    content: input.content ?? null,
+    toolName: input.toolName ?? null,
+    toolArgs: input.toolArgs ?? null,
+    toolArgsRaw: input.toolArgsRaw ?? null,
+    parseOk: input.parseOk ?? null,
+    toolResult: input.toolResult ?? null,
+    isError: input.isError ?? false,
+    latencyMs: input.latencyMs ?? null,
+    promptTokens: input.promptTokens ?? null,
+    completionTokens: input.completionTokens ?? null,
+    raw: truncateRaw(input.raw),
+  };
+}
+
 /**
  * A run being written, with its own step counter.
  *
  * Constructed by `forNewRun` (the `/model/chat` case) or `forExistingRun` (a call
  * appended to a run the browser-side harness already opened in M11), and the difference
  * between the two is one `select max(step_index)`.
+ *
+ * Takes a `DbLike` rather than a `Db` so it can be constructed on a transaction handle:
+ * `POST /model/runs/:id/steps` applies its whole batch in one transaction, and a
+ * recorder holding the pool handle would write outside it.
  */
 export class RunRecorder implements StepWriter {
   private stepIndex: number;
 
   private constructor(
-    private readonly db: Db,
+    private readonly db: DbLike,
     readonly runId: string,
     startIndex: number,
   ) {
     this.stepIndex = startIndex;
   }
 
-  static forNewRun(db: Db, runId: string): RunRecorder {
+  static forNewRun(db: DbLike, runId: string): RunRecorder {
     return new RunRecorder(db, runId, 0);
   }
 
-  static async forExistingRun(db: Db, runId: string): Promise<RunRecorder> {
-    const [last] = await db
-      .select({ stepIndex: agentRunSteps.stepIndex })
-      .from(agentRunSteps)
-      .where(eq(agentRunSteps.runId, runId))
-      .orderBy(desc(agentRunSteps.stepIndex))
-      .limit(1);
-    return new RunRecorder(db, runId, last ? last.stepIndex + 1 : 0);
+  static async forExistingRun(db: DbLike, runId: string): Promise<RunRecorder> {
+    return new RunRecorder(db, runId, await nextStepIndex(db, runId));
   }
 
   async step(input: StepInput): Promise<StepRow> {
     const [row] = await this.db
       .insert(agentRunSteps)
-      .values({
-        runId: this.runId,
-        stepIndex: this.stepIndex,
-        kind: input.kind,
-        iteration: input.iteration,
-        content: input.content ?? null,
-        toolName: input.toolName ?? null,
-        toolArgs: input.toolArgs ?? null,
-        toolArgsRaw: input.toolArgsRaw ?? null,
-        parseOk: input.parseOk ?? null,
-        toolResult: input.toolResult ?? null,
-        isError: input.isError ?? false,
-        latencyMs: input.latencyMs ?? null,
-        promptTokens: input.promptTokens ?? null,
-        completionTokens: input.completionTokens ?? null,
-        raw: truncateRaw(input.raw),
-      })
+      .values(stepValues(this.runId, this.stepIndex, input))
       .returning();
     if (!row) throw new Error('failed to append agent run step');
     this.stepIndex += 1;
@@ -227,6 +237,185 @@ export class RunRecorder implements StepWriter {
       })
       .where(eq(agentRuns.id, this.runId));
   }
+}
+
+// ------------------------------------------- client-reported steps (M16) ----
+
+/** The next free `step_index` for a run. One row read, not a `count(*)`. */
+export async function nextStepIndex(db: DbLike, runId: string): Promise<number> {
+  const [last] = await db
+    .select({ stepIndex: agentRunSteps.stepIndex })
+    .from(agentRunSteps)
+    .where(eq(agentRunSteps.runId, runId))
+    .orderBy(desc(agentRunSteps.stepIndex))
+    .limit(1);
+  return last ? last.stepIndex + 1 : 0;
+}
+
+/**
+ * Locks a run row for the rest of the enclosing transaction.
+ *
+ * `POST /model/runs/:id/steps` allocates `step_index` by reading the highest one and
+ * adding to it, which is a read-modify-write and therefore a race with any other writer
+ * on the same run. Two concurrent posts — which is precisely what a retry that overtakes
+ * its original *is* — would compute the same index and one of them would die on
+ * `(run_id, step_index)` with a 500, turning a harmless duplicate into an error. The
+ * lock serialises appends per run, and the run row is the natural thing to take it on
+ * because every writer already has the id.
+ *
+ * Returns `undefined` when the run does not exist or is not this user's, so the caller
+ * can 404 from inside the transaction without a second query.
+ */
+export async function lockRunForUpdate(
+  db: DbLike,
+  userId: string,
+  runId: string,
+): Promise<RunRow | undefined> {
+  const [row] = await db
+    .select()
+    .from(agentRuns)
+    .where(and(eq(agentRuns.id, runId), eq(agentRuns.userId, userId)))
+    .for('update')
+    .limit(1);
+  return row;
+}
+
+/**
+ * What happened to one reported step.
+ *
+ * `conflict` is the case worth naming: the same `clientStepId` arrived carrying
+ * *different* content. That is not a retry, it is two different steps claiming one
+ * identity, and silently returning the first would hide a client bug behind the
+ * idempotency mechanism that exists to make client bugs harmless.
+ */
+export type ReportedStepOutcome =
+  | { status: 'created'; row: StepRow }
+  | { status: 'replayed'; row: StepRow }
+  | { status: 'conflict'; row: StepRow };
+
+/**
+ * JSON with its object keys sorted, recursively.
+ *
+ * Needed because the replay comparison puts a value that has been through `jsonb`
+ * (which reorders keys by its own rules) next to one that has not. Comparing
+ * `JSON.stringify` output directly would report `{"a":1,"b":2}` and `{"b":2,"a":1}` as
+ * different steps and reject a perfectly good retry.
+ */
+export function canonicalJson(value: unknown): string {
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node !== null && typeof node === 'object') {
+      return Object.fromEntries(
+        Object.keys(node as Record<string, unknown>)
+          .sort()
+          .map((key) => [key, walk((node as Record<string, unknown>)[key])]),
+      );
+    }
+    return node;
+  };
+  return JSON.stringify(walk(value) ?? null);
+}
+
+/** The fields a replay has to match. `stepIndex`, `id` and `createdAt` are the server's. */
+function stepFingerprint(row: {
+  kind: string;
+  iteration: number;
+  content: string | null;
+  toolName: string | null;
+  toolArgs: unknown;
+  toolArgsRaw: string | null;
+  parseOk: boolean | null;
+  toolResult: unknown;
+  isError: boolean;
+  latencyMs: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+}): string {
+  return canonicalJson({
+    kind: row.kind,
+    iteration: row.iteration,
+    content: row.content,
+    toolName: row.toolName,
+    toolArgs: row.toolArgs ?? null,
+    toolArgsRaw: row.toolArgsRaw,
+    parseOk: row.parseOk,
+    toolResult: row.toolResult ?? null,
+    isError: row.isError,
+    latencyMs: row.latencyMs,
+    promptTokens: row.promptTokens,
+    completionTokens: row.completionTokens,
+  });
+}
+
+async function findByClientStepId(
+  db: DbLike,
+  runId: string,
+  clientStepId: string,
+): Promise<StepRow | undefined> {
+  const [row] = await db
+    .select()
+    .from(agentRunSteps)
+    .where(and(eq(agentRunSteps.runId, runId), eq(agentRunSteps.clientStepId, clientStepId)))
+    .limit(1);
+  return row;
+}
+
+/**
+ * Is this step one the run already has, without writing anything?
+ *
+ * The read-only half, for a run that has already finished. A worker whose `final` step
+ * closed the run and whose response was then lost will retry it, and answering that
+ * retry with "this run has finished" would report a failure at the end of a run that
+ * succeeded. So a terminal run still recognises its own steps; it just cannot accept
+ * new ones.
+ */
+export async function replayReportedStep(
+  db: DbLike,
+  runId: string,
+  input: StepInput & { clientStepId: string },
+): Promise<ReportedStepOutcome | { status: 'missing' }> {
+  const existing = await findByClientStepId(db, runId, input.clientStepId);
+  if (!existing) return { status: 'missing' };
+  return stepFingerprint(existing) === stepFingerprint(stepValues(runId, 0, input))
+    ? { status: 'replayed', row: existing }
+    : { status: 'conflict', row: existing };
+}
+
+/**
+ * Appends one client-reported step, or recognises it as a replay of one already stored.
+ *
+ * `ON CONFLICT (run_id, client_step_id) DO NOTHING` rather than a read-then-insert: the
+ * check and the write are one statement, so there is no window between them, and the
+ * database — not this function — is what guarantees the step appears once. The
+ * `RETURNING` clause is empty exactly when the row was already there, which is how the
+ * replay branch is detected without a second round trip on the common path.
+ *
+ * Must be called inside the transaction that holds `lockRunForUpdate`.
+ */
+export async function appendReportedStep(
+  db: DbLike,
+  runId: string,
+  stepIndex: number,
+  input: StepInput & { clientStepId: string },
+): Promise<ReportedStepOutcome> {
+  const values = stepValues(runId, stepIndex, input);
+  const [inserted] = await db
+    .insert(agentRunSteps)
+    .values(values)
+    .onConflictDoNothing({
+      target: [agentRunSteps.runId, agentRunSteps.clientStepId],
+    })
+    .returning();
+  if (inserted) return { status: 'created', row: inserted };
+
+  const existing = await findByClientStepId(db, runId, input.clientStepId);
+  // The conflict fired, so the row is there; a miss means someone deleted it between
+  // the two statements, which inside one transaction cannot happen.
+  if (!existing) throw new Error('reported step conflicted but could not be re-read');
+
+  return stepFingerprint(existing) === stepFingerprint(values)
+    ? { status: 'replayed', row: existing }
+    : { status: 'conflict', row: existing };
 }
 
 // --------------------------------------------------------------------- reading ----
@@ -381,7 +570,7 @@ export async function loadStepsAfter(
 }
 
 /** The run row without its steps, for the `end` event and the cancel route. */
-export async function loadRunSummary(db: Db, runId: string): Promise<RunSummary | null> {
+export async function loadRunSummary(db: DbLike, runId: string): Promise<RunSummary | null> {
   const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
   return row ? toRunSummary(row) : null;
 }
@@ -415,7 +604,7 @@ export async function markCancelled(db: Db, runId: string): Promise<boolean> {
 
 /** Closes a run the client-side harness finished (M11's `final` step). Same race guard. */
 export async function markCompleted(
-  db: Db,
+  db: DbLike,
   runId: string,
   finalOutput: string | null,
 ): Promise<boolean> {

@@ -448,3 +448,113 @@ describe('SecuritySettingsPage enrollment wizard', () => {
     });
   });
 });
+
+/**
+ * The two panels below the wizard.
+ *
+ * Both were entirely untested — 13 of `SecuritySettingsPage`'s 36 functions were
+ * unreached and these accounted for most of them — and both are credential flows, which
+ * is the last place to accept "it is probably fine". The server side is pinned by
+ * `apps/api/test/integration/auth.test.ts`; what is checked here is the client's own
+ * refusal to send, which the server never sees.
+ */
+describe('SecuritySettingsPage, the rest of the page', () => {
+  beforeEach(() => {
+    route('GET /auth/sessions', () => json({ sessions: [] }));
+  });
+
+  it('will not send a password change until every rule on screen is green', async () => {
+    meAuthenticated();
+    route('PATCH /auth/password', () => ({ status: 204 }));
+
+    renderAt('/settings/security');
+    const panel = await screen.findByTestId('password-panel');
+    const submit = within(panel).getByRole('button', { name: /change password/i });
+
+    // Too short.
+    await type(/current password/i, 'correct horse battery staple', panel);
+    await type(/^new password$/i, 'short', panel);
+    await type(/confirm new password/i, 'short', panel);
+    expect(submit).toBeDisabled();
+
+    // Long enough, but the two fields disagree.
+    await type(/^new password$/i, 'a much longer passphrase', panel);
+    expect(submit).toBeDisabled();
+
+    // Long enough and matching, but identical to the current one: changing a password to
+    // itself is the failure this check exists for, and the server would accept it.
+    await type(/^new password$/i, 'correct horse battery staple', panel);
+    await type(/confirm new password/i, 'correct horse battery staple', panel);
+    expect(submit).toBeDisabled();
+
+    await type(/^new password$/i, 'a much longer passphrase', panel);
+    await type(/confirm new password/i, 'a much longer passphrase', panel);
+    expect(submit).toBeEnabled();
+    // Nothing has left the browser through any of that.
+    expect(calls.some((call) => call.key === 'PATCH /auth/password')).toBe(false);
+
+    fireEvent.click(submit);
+    await waitFor(() => {
+      expect(calls.find((call) => call.key === 'PATCH /auth/password')?.body).toEqual({
+        currentPassword: 'correct horse battery staple',
+        newPassword: 'a much longer passphrase',
+      });
+    });
+    // The fields are emptied, so the new password is not left sitting in the DOM.
+    await within(panel).findByText(/password changed/i);
+    expect(within(panel).getByLabelText(/^new password$/i)).toHaveValue('');
+  });
+
+  it('reports a rejected password change and keeps the form usable', async () => {
+    meAuthenticated();
+    route('PATCH /auth/password', () =>
+      apiError(403, 'INVALID_CREDENTIALS', 'Current password is incorrect'),
+    );
+
+    renderAt('/settings/security');
+    const panel = await screen.findByTestId('password-panel');
+    await type(/current password/i, 'wrong password here', panel);
+    await type(/^new password$/i, 'a much longer passphrase', panel);
+    await type(/confirm new password/i, 'a much longer passphrase', panel);
+    fireEvent.click(within(panel).getByRole('button', { name: /change password/i }));
+
+    expect(await within(panel).findByTestId('form-error')).toBeInTheDocument();
+    expect(within(panel).queryByText(/password changed/i)).not.toBeInTheDocument();
+    // Still on the form with the typed values intact: an error that clears the fields
+    // makes the user retype a passphrase they got right.
+    expect(within(panel).getByLabelText(/^new password$/i)).toHaveValue('a much longer passphrase');
+  });
+
+  it('regenerates backup codes behind a step-up and shows the new sheet once', async () => {
+    const NEW_CODES = Array.from({ length: 10 }, (_, index) => `cccc${index}-dddd${index}`);
+    meAuthenticated({ mfaEnabled: true }, 1);
+    route('POST /auth/mfa/backup-codes/regenerate', () => json({ backupCodes: NEW_CODES }));
+
+    renderAt('/settings/security');
+    const panel = await screen.findByTestId('mfa-panel');
+    await waitFor(() => expect(panel).toHaveTextContent('1 backup code'));
+
+    fireEvent.click(within(panel).getByRole('button', { name: /generate new backup codes/i }));
+    // Destructive, so it says so before asking for anything.
+    expect(within(panel).getByText(/stop working immediately/i)).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: /i understand, continue/i }));
+
+    await type(/current password/i, 'correct horse battery staple', panel);
+    await type(/code from your app/i, '123456', panel);
+    fireEvent.click(within(panel).getByRole('button', { name: /generate new codes/i }));
+
+    const sheet = await screen.findByTestId('backup-codes');
+    expect(sheet.querySelectorAll('li')).toHaveLength(10);
+    expect(sheet).toHaveTextContent(NEW_CODES[0] as string);
+    expect(
+      calls.find((call) => call.key === 'POST /auth/mfa/backup-codes/regenerate')?.body,
+    ).toEqual({ password: 'correct horse battery staple', code: '123456' });
+
+    // Same gate as enrollment: these are shown exactly once.
+    const done = within(panel).getByRole('button', { name: /^done$/i });
+    expect(done).toBeDisabled();
+    fireEvent.click(within(panel).getByRole('checkbox'));
+    fireEvent.click(done);
+    await waitFor(() => expect(screen.queryByTestId('backup-codes')).not.toBeInTheDocument());
+  });
+});

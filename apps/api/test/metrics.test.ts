@@ -8,9 +8,11 @@ import {
   countToolParseFailure,
   getMetrics,
   ITERATION_BUCKETS,
+  logModelCallContent,
   MODEL_CALL_BUCKETS,
   modelErrorClass,
   observeModelCall,
+  observeToolCall,
   resetMetrics,
 } from '../src/plugins/metrics.js';
 
@@ -256,5 +258,129 @@ describe('modelErrorClass', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+// ------------------------------------------------- structured log lines (M16) ----
+
+/**
+ * The level policy, asserted without a database or a model.
+ *
+ * `docs/05` only says *what fields* to log; the levels are this project's decision and
+ * the M15 postmortem is the argument for them. The integration suite proves the lines
+ * come out of a real run; this proves the rule they follow, which is the part someone
+ * would change by accident while adding a sixth event.
+ */
+describe('the log level of a model-path event', () => {
+  const recorder = () => {
+    const seen: { level: string; line: Record<string, unknown> }[] = [];
+    const push = (level: string) => (line: object) =>
+      seen.push({ level, line: line as Record<string, unknown> });
+    return {
+      seen,
+      logger: {
+        info: push('info'),
+        warn: push('warn'),
+        error: push('error'),
+        debug: push('debug'),
+      },
+    };
+  };
+
+  // No `userId`/`reqId`: the request logger binds both, and duplicating them in the
+  // payload makes pino write the key twice.
+  const ctx = (logger: ReturnType<typeof recorder>['logger']) => ({ logger, runId: 'run-1' });
+
+  it('logs a successful model call at info and a failed one at warn', () => {
+    const { seen, logger } = recorder();
+    const log = {
+      ...ctx(logger),
+      stepIndex: 0,
+      iteration: 1,
+      promptTokens: 1,
+      completionTokens: 2,
+    };
+
+    observeModelCall({ provider: 'fake', model: 'm', outcome: 'success', durationMs: 5, log });
+    observeModelCall({
+      provider: 'fake',
+      model: 'm',
+      outcome: 'unavailable',
+      durationMs: 5,
+      log: { ...log, stepIndex: 1, errorCode: 'MODEL_UNAVAILABLE' },
+    });
+
+    expect(seen.map((entry) => entry.level)).toEqual(['info', 'warn']);
+    // A provider that is down is an outage. `error` would train the reader to ignore
+    // the level, which is the one thing a level must not do.
+    expect(seen.some((entry) => entry.level === 'error')).toBe(false);
+    expect(seen[1]?.line).toMatchObject({
+      event: 'model_call',
+      outcome: 'unavailable',
+      errorCode: 'MODEL_UNAVAILABLE',
+      latencyMs: 5,
+    });
+  });
+
+  it('logs a parse failure at warn and counts it; a clean call at info and does not', () => {
+    const { seen, logger } = recorder();
+    const log = { ...ctx(logger), stepIndex: 0, iteration: 1 };
+
+    observeToolCall({ tool: 'calculator', parseOk: true, recovered: false, log });
+    observeToolCall({
+      tool: 'calculator',
+      parseOk: false,
+      recovered: true,
+      log: { ...log, stepIndex: 1 },
+    });
+
+    expect(seen.map((entry) => entry.level)).toEqual(['info', 'warn']);
+    expect(seen[1]?.line).toMatchObject({ parseOk: false, recovered: true });
+    // One counter increment, for the one provider-side parse failure (docs/adr/0002 §2).
+    const counted = getMetrics().toolCallParseFailures as unknown as {
+      hashMap: Record<string, { value: number }>;
+    };
+    expect(Object.values(counted.hashMap).reduce((sum, entry) => sum + entry.value, 0)).toBe(1);
+  });
+
+  it('logs a completed or cancelled run at info and a failed or runaway one at warn', () => {
+    const { seen, logger } = recorder();
+    const log = {
+      ...ctx(logger),
+      provider: 'fake',
+      model: 'm',
+      toolCalls: 0,
+      parseFailures: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      latencyMs: 0,
+    };
+
+    countRunFinished('agent', 'completed', 1, log);
+    countRunFinished('agent', 'cancelled', 1, log);
+    countRunFinished('agent', 'failed', 1, { ...log, errorCode: 'MODEL_UNAVAILABLE' });
+    countRunFinished('agent', 'max_iterations', 8, { ...log, errorCode: 'MAX_ITERATIONS' });
+
+    expect(seen.map((entry) => entry.level)).toEqual(['info', 'info', 'warn', 'warn']);
+  });
+
+  it('keeps prompt text off every level but debug, and skips the work when debug is off', () => {
+    const { seen, logger } = recorder();
+    let built = 0;
+    const content = () => {
+      built += 1;
+      return { systemPrompt: 'secret-system', userPrompt: 'secret-user' };
+    };
+
+    logModelCallContent({ ...logger, isLevelEnabled: () => false }, 'run-1', 0, content);
+    // Not merely filtered by pino: the callback is never invoked, so a 100 KB
+    // transcript is not serialised at `info` to be thrown away.
+    expect(built).toBe(0);
+    expect(seen).toEqual([]);
+
+    logModelCallContent({ ...logger, isLevelEnabled: () => true }, 'run-1', 0, content);
+    expect(built).toBe(1);
+    expect(seen[0]?.level).toBe('debug');
+    expect(seen[0]?.line).toMatchObject({ event: 'model_call_content', runId: 'run-1' });
   });
 });

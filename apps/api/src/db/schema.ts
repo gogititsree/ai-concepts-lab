@@ -467,8 +467,18 @@ export const agentRunSteps = pgTable(
     runId: uuid('run_id')
       .notNull()
       .references(() => agentRuns.id, { onDelete: 'cascade' }),
-    /** 0-based, monotonic within a run. */
+    /** 0-based, monotonic within a run. Allocated by the server, never by the client. */
     stepIndex: integer('step_index').notNull(),
+    /**
+     * The client's own name for this step, for `POST /model/runs/:id/steps` (M16).
+     *
+     * NULL for every step the server writes itself, and that is load-bearing: Postgres
+     * treats NULLs as distinct in a unique index, so the agent loop can write thousands
+     * of rows with no key while the client-reported ones are deduplicated. The
+     * alternative — a sentinel value — would make the unique index fire on the second
+     * server-written step of every run.
+     */
+    clientStepId: text('client_step_id'),
     kind: stepKind('kind').notNull(),
     iteration: integer('iteration').notNull(),
     /** Assistant text (model_call / final) or the error text. */
@@ -490,6 +500,13 @@ export const agentRunSteps = pgTable(
   },
   (table) => [
     uniqueIndex('agent_run_steps_run_id_step_index_key').on(table.runId, table.stepIndex),
+    /**
+     * What makes `POST /model/runs/:id/steps` idempotent. The `(run_id, step_index)`
+     * index above cannot do it — the server picks `step_index`, so a replayed step just
+     * gets the next free one. This constraint is the guarantee; the handler's
+     * `ON CONFLICT DO NOTHING` is only how it asks for it politely.
+     */
+    uniqueIndex('agent_run_steps_run_id_client_step_id_key').on(table.runId, table.clientStepId),
   ],
 );
 

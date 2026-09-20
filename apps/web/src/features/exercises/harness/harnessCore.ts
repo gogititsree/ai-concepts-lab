@@ -243,7 +243,23 @@ export interface HarnessRunOutput extends HarnessRunAgentResult {
 export async function runHarness(input: RunHarnessInput): Promise<HarnessRunOutput> {
   const now = input.now ?? (() => Date.now());
   const startedAt = now();
-  const counters = { modelCalls: 0, iteration: 0 };
+  const counters = { modelCalls: 0, iteration: 0, steps: 0 };
+
+  /**
+   * The idempotency key for one reported step.
+   *
+   * Minted **here, where the step is created** — not in `useHarnessRunner` where it is
+   * posted. That is the whole mechanism: a retry must resend the same step object with the
+   * same id, so the server can recognise it and do nothing. Generating the id at post time
+   * would give every retry a fresh one and turn `UNIQUE (run_id, client_step_id)` into an
+   * expensive way to insert duplicates.
+   *
+   * A plain counter is enough because it only has to be unique within this run and stable
+   * across retries of the same step, and a step is created exactly once. It deliberately
+   * is *not* the step's position: the server owns `step_index`, and the two legitimately
+   * differ because the server writes its own `model_call` rows into the same harness run.
+   */
+  const nextStepId = (): string => `c${++counters.steps}`;
 
   const checkDeadline = (): void => {
     if (now() - startedAt > input.deadlineMs) throw new HarnessTimeoutError(input.deadlineMs);
@@ -286,6 +302,7 @@ export async function runHarness(input: RunHarnessInput): Promise<HarnessRunOutp
       checkDeadline();
       const iteration = Math.max(1, counters.iteration);
       input.onStep({
+        clientStepId: nextStepId(),
         kind: 'tool_call',
         iteration,
         toolName: name,
@@ -296,6 +313,7 @@ export async function runHarness(input: RunHarnessInput): Promise<HarnessRunOutp
       try {
         const result = fn(args);
         input.onStep({
+          clientStepId: nextStepId(),
           kind: 'tool_result',
           iteration,
           toolName: name,
@@ -307,6 +325,7 @@ export async function runHarness(input: RunHarnessInput): Promise<HarnessRunOutp
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         input.onStep({
+          clientStepId: nextStepId(),
           kind: 'tool_result',
           iteration,
           toolName: name,
@@ -327,6 +346,7 @@ export async function runHarness(input: RunHarnessInput): Promise<HarnessRunOutp
 
   const result = validateResult(returned);
   input.onStep({
+    clientStepId: nextStepId(),
     kind: 'final',
     iteration: Math.max(1, counters.iteration),
     content: result.finalText,

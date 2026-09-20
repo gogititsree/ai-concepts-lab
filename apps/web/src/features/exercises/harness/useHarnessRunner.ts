@@ -14,6 +14,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { apiGet, apiPost } from '../../../lib/apiClient';
+import { isModelUnavailableError, useRefreshModelHealth } from '../prompt/useChatRun';
 import type { ScenarioOutcome, ScenarioOutcomes } from './checks';
 import {
   MAX_CONSOLE_LINES,
@@ -283,6 +284,7 @@ export function toChatMessages(messages: readonly HarnessMessage[]): ChatMessage
 export function useHarnessRunner(
   createWorker: WorkerFactory = defaultWorkerFactory,
 ): HarnessRunnerState {
+  const refreshModelHealth = useRefreshModelHealth();
   const [status, setStatus] = useState<HarnessRunnerStatus>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
   const [logs, setLogs] = useState<ConsoleLine[]>([]);
@@ -443,6 +445,7 @@ export function useHarnessRunner(
         created = await apiPost('/model/runs', { body, schema: CreateRunResponseSchema });
       } catch (caught) {
         if (!mountedRef.current) return;
+        if (isModelUnavailableError(caught)) refreshModelHealth();
         setError(caught instanceof Error ? caught.message : String(caught));
         setStatus('error');
         return;
@@ -456,18 +459,27 @@ export function useHarnessRunner(
         onLog: appendLog,
         onStep: (step) => void reportSteps(created.runId, [step]),
         onModelRequest: async (messages, defs, iteration) => {
-          const response = await apiPost('/model/chat', {
-            body: {
-              messages: toChatMessages(messages),
-              ...(defs.length > 0 ? { tools: defs } : {}),
-              runId: created.runId,
-              // So the `model_call` row the server writes joins the tool rows this
-              // pass reported, instead of every call landing in iteration 1.
-              iteration,
-              options: { temperature: 0 },
-            },
-            schema: ModelChatResponseSchema,
-          });
+          let response;
+          try {
+            response = await apiPost('/model/chat', {
+              body: {
+                messages: toChatMessages(messages),
+                ...(defs.length > 0 ? { tools: defs } : {}),
+                runId: created.runId,
+                // So the `model_call` row the server writes joins the tool rows this
+                // pass reported, instead of every call landing in iteration 1.
+                iteration,
+                options: { temperature: 0 },
+              },
+              schema: ModelChatResponseSchema,
+            });
+          } catch (caught) {
+            // Module 6's real run is the learner's own loop calling `/model/chat` from a
+            // worker, so the failure arrives here rather than in `useChatRun` — but the
+            // banner above it is the same banner and deserves the same immediate answer.
+            if (isModelUnavailableError(caught)) refreshModelHealth();
+            throw caught;
+          }
           return {
             content: response.message.content,
             toolCalls: (response.message.toolCalls ?? []).map((call) => ({
@@ -522,7 +534,7 @@ export function useHarnessRunner(
       }
       if (mountedRef.current) setStatus(result.ok ? 'idle' : 'error');
     },
-    [appendLog, createWorker, reportSteps],
+    [appendLog, createWorker, refreshModelHealth, reportSteps],
   );
 
   const cancel = useCallback(() => {

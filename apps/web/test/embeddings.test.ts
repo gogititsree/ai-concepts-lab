@@ -53,13 +53,22 @@ describe('the shipped fallback file', () => {
 });
 
 /**
- * 30 s, not the 5 s default. These run the real `pca` over the shipped 768-dimension
+ * 90 s, not the 5 s default. These run the real `pca` over the shipped 768-dimension
  * embeddings, which means a 768x768 covariance matrix and power iteration with deflation
  * -- and the first test does it twice to prove determinism. That is a few seconds on a
  * developer machine and over ten on a two-core CI runner, where it failed on the first
  * pipeline run. The computation is the point of the test, so the budget moves, not the work.
+ *
+ * It moved again, from 30 s to 90 s, when the web workspace got a coverage gate (M17).
+ * `@lab/nn-core` is aliased to its *source* here, so under `--coverage` V8 block coverage
+ * is collected through the hot numeric loops: measured on the reference machine the first
+ * test is 0.98 s plain, 10.8 s under coverage on its own, and 34.5 s under coverage while
+ * the other 23 test files compete for the same cores. The 30 s budget was already inside
+ * that range, so the coverage gate would have been a coin toss on a loaded runner. This is
+ * a timeout for an arithmetic-bound test, not a hang detector; 90 s costs nothing when the
+ * test passes and still fails fast if `pca` ever stops terminating.
  */
-describe('PCA projection', { timeout: 30_000 }, () => {
+describe('PCA projection', { timeout: 90_000 }, () => {
   const data = words.map((word) => PRECOMPUTED_EMBEDDINGS.vectors[word] as number[]);
 
   it('is deterministic: the same vectors give byte-identical coordinates', () => {

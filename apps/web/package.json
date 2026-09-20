@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --config vitest.coverage.config.ts --coverage",
+    "test:coverage:gate": "vitest run --config vitest.coverage.config.ts --coverage"
   },
   "dependencies": {
     "@lab/nn-core": "workspace:*",

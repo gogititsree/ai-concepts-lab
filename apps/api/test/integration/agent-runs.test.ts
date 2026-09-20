@@ -519,13 +519,27 @@ describe('POST /model/runs/:id/cancel', () => {
 
 // ------------------------------------------------------- client-reported steps ----
 
+/**
+ * Gives a step a fresh `clientStepId` when the test did not name one itself (M16).
+ *
+ * The id is required by the schema now, and most of the tests below are about
+ * something else entirely — indices, rollups, ownership, size limits. A step that
+ * already carries an id keeps it, which is how the idempotency tests say "send that
+ * exact step again" while everything else stays about what it was about.
+ */
+let autoKeySeq = 0;
+const withKey = (step: unknown): unknown =>
+  step !== null && typeof step === 'object' && 'clientStepId' in step
+    ? step
+    : { clientStepId: `auto-${(autoKeySeq += 1)}`, ...(step as object) };
+
 describe('POST /model/runs/:id/steps', () => {
   const report = (id: string, steps: unknown[], auth: string = cookie) =>
     app.inject({
       method: 'POST',
       url: `/api/v1/model/runs/${id}/steps`,
       headers: { ...WRITE_HEADERS, cookie: auth },
-      payload: { steps },
+      payload: { steps: steps.map(withKey) },
     });
 
   const openHarness = async (): Promise<string> => {
@@ -636,6 +650,233 @@ describe('POST /model/runs/:id/steps', () => {
   });
 });
 
+// ------------------------------------------------------------- idempotency ----
+
+/**
+ * `POST /model/runs/:id/steps` is idempotent per `clientStepId` (M16).
+ *
+ * Before this, three identical posts made three steps: `UNIQUE (run_id, step_index)`
+ * looks like replay protection but the server picks `step_index`, so a replay simply
+ * took the next free one. The worker does not retry *yet*, which is the only reason it
+ * had not bitten — and "add a retry" is the obvious next change to a network call.
+ *
+ * Every assertion here is about a property a retrying client depends on, not about the
+ * mechanism: send it twice and nothing extra appears; send an overlapping window and
+ * only the new part lands; reuse an id for a different step and be told clearly; fail
+ * in the middle of a batch and find nothing behind you.
+ */
+describe('POST /model/runs/:id/steps is idempotent', () => {
+  const post = (id: string, steps: unknown[], auth: string = cookie) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/v1/model/runs/${id}/steps`,
+      headers: { ...WRITE_HEADERS, cookie: auth },
+      payload: { steps },
+    });
+
+  const openHarness = async (): Promise<string> => {
+    const created = await createRun({ kind: 'harness' });
+    return created.json().runId as string;
+  };
+
+  const countSteps = async (runId: string): Promise<number> => {
+    const rows = await ctx.sql`select count(*) from agent_run_steps where run_id = ${runId}`;
+    return Number(rows[0]?.count);
+  };
+
+  const toolCall = (n: number) => ({
+    clientStepId: `step-${n}`,
+    kind: 'tool_call',
+    iteration: 1,
+    toolName: 'calculator',
+    toolArgs: { expression: `${n}+${n}` },
+    parseOk: true,
+  });
+
+  it('a replayed batch adds nothing and answers with the same body', async () => {
+    const runId = await openHarness();
+    const batch = [toolCall(1), toolCall(2)];
+
+    const first = await post(runId, batch);
+    expect(first.statusCode).toBe(201);
+    expect(await countSteps(runId)).toBe(2);
+
+    // The retry a worker with a timeout would make: same bytes, second time.
+    const second = await post(runId, batch);
+    const third = await post(runId, batch);
+
+    // 201 again, not 409. A retry is safe, not merely rejected — a caller that has to
+    // handle a new error code has not been given idempotency.
+    expect(second.statusCode).toBe(201);
+    expect(third.statusCode).toBe(201);
+    expect(second.json()).toEqual(first.json());
+    expect(third.json()).toEqual(first.json());
+    expect(await countSteps(runId)).toBe(2);
+
+    // And the rollups did not triple either: three posts, two tool calls.
+    const run = (await getRun(runId)).json();
+    expect(run.toolCallCount).toBe(2);
+  });
+
+  it('an interleaved partial replay adds only the step it has not seen', async () => {
+    const runId = await openHarness();
+
+    await post(runId, [toolCall(1), toolCall(2)]);
+    expect(await countSteps(runId)).toBe(2);
+
+    // The worker retried with a wider window — it had queued a third step by the time
+    // the timeout fired. Steps 1 and 2 are replays; only 3 is new.
+    const widened = await post(runId, [toolCall(1), toolCall(2), toolCall(3)]);
+    expect(widened.statusCode).toBe(201);
+    expect(await countSteps(runId)).toBe(3);
+
+    // The response describes all three, and the first two still carry their original
+    // indices rather than being renumbered behind the client's back.
+    const indices = widened.json().steps.map((step: { stepIndex: number }) => step.stepIndex);
+    expect(indices).toEqual([0, 1, 2]);
+
+    const run = (await getRun(runId)).json();
+    expect(run.toolCallCount).toBe(3);
+    expect(
+      (run.steps as { toolArgs: { expression: string } }[]).map((s) => s.toolArgs.expression),
+    ).toEqual(['1+1', '2+2', '3+3']);
+  });
+
+  it('rejects a different step wearing an id the run has already used', async () => {
+    const runId = await openHarness();
+    await post(runId, [toolCall(1)]);
+
+    const impostor = await post(runId, [{ ...toolCall(1), toolArgs: { expression: '9+9' } }]);
+    expect(impostor.statusCode).toBe(409);
+    expect(impostor.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    // The message has to be actionable: it names the id and says what the rule is.
+    expect(impostor.json().error.message).toContain('step-1');
+
+    // Nothing was written, and the original is untouched.
+    expect(await countSteps(runId)).toBe(1);
+    const run = (await getRun(runId)).json();
+    expect((run.steps as { toolArgs: { expression: string } }[])[0]?.toolArgs.expression).toBe(
+      '1+1',
+    );
+  });
+
+  it('applies a batch atomically: a step that fails mid-batch takes the whole batch with it', async () => {
+    const runId = await openHarness();
+    await post(runId, [toolCall(1)]);
+
+    // Three steps: two brand new, and in the middle a reused id with different
+    // content. Without a transaction the first new step would already be committed.
+    const mixed = await post(runId, [
+      toolCall(7),
+      { ...toolCall(1), toolArgs: { expression: 'not the same' } },
+      toolCall(8),
+    ]);
+    expect(mixed.statusCode).toBe(409);
+    expect(mixed.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+
+    // Still just the one step from before: nothing from the rejected batch survived,
+    // including the step *before* the failure.
+    expect(await countSteps(runId)).toBe(1);
+    const run = (await getRun(runId)).json();
+    expect(run.toolCallCount).toBe(1);
+    expect(run.status).toBe('running');
+  });
+
+  it('will not let one batch use the same id twice', async () => {
+    const runId = await openHarness();
+    // Caught by the schema, so the transaction never opens. A batch that contradicts
+    // itself is a client bug and there is no sensible resolution to invent.
+    const res = await post(runId, [toolCall(1), toolCall(1)]);
+    expect(res.statusCode).toBe(400);
+    expect(await countSteps(runId)).toBe(0);
+  });
+
+  it('requires an id at all', async () => {
+    const runId = await openHarness();
+    const res = await post(runId, [{ kind: 'final', iteration: 1, content: 'no id' }]);
+    expect(res.statusCode).toBe(400);
+    expect(await countSteps(runId)).toBe(0);
+  });
+
+  it('keeps a replayed `final` from closing the run twice', async () => {
+    const runId = await openHarness();
+    const final = { clientStepId: 'the-end', kind: 'final', iteration: 1, content: 'done' };
+
+    expect((await post(runId, [final])).statusCode).toBe(201);
+    const closed = (await getRun(runId)).json();
+    expect(closed.status).toBe('completed');
+
+    // The retry arrives after the run is terminal. It is a replay of a step this run
+    // already has, so it is answered rather than rejected — the alternative is a worker
+    // that reports a spurious failure at the very end of a successful run.
+    const retry = await post(runId, [final]);
+    expect(retry.statusCode).toBe(201);
+    expect(retry.json().steps[0].stepIndex).toBe(0);
+    expect(await countSteps(runId)).toBe(1);
+
+    // A *new* step after the run is closed is still a 409: idempotency is about
+    // repeating yourself, not about reopening a finished run.
+    const after = await post(runId, [
+      { clientStepId: 'too-late', kind: 'final', iteration: 2, content: 'again' },
+    ]);
+    expect(after.statusCode).toBe(409);
+    expect(after.json().error.code).toBe('RUN_NOT_RUNNING');
+  });
+
+  it('treats a re-serialised step as the same step, not a conflict', async () => {
+    const runId = await openHarness();
+    await post(runId, [
+      {
+        clientStepId: 'stable',
+        kind: 'tool_result',
+        iteration: 1,
+        toolName: 'calculator',
+        toolResult: { expression: '1+1', result: 2, exact: true },
+      },
+    ]);
+
+    // Same step, JSON keys in a different order. `jsonb` reorders keys by its own
+    // rules on the way in, so comparing serialised forms naively would call this a
+    // different step and 409 a retry that is entirely correct. A worker that
+    // re-serialises its queue — or a JS engine that iterates an object differently —
+    // must not be punished for it.
+    const reordered = await post(runId, [
+      {
+        clientStepId: 'stable',
+        toolResult: { exact: true, result: 2, expression: '1+1' },
+        toolName: 'calculator',
+        iteration: 1,
+        kind: 'tool_result',
+      },
+    ]);
+    expect(reordered.statusCode).toBe(201);
+    expect(await countSteps(runId)).toBe(1);
+  });
+
+  it('ignores the ids of a run that is not this one', async () => {
+    const first = await openHarness();
+    const second = await openHarness();
+    // The key is unique per run, not globally: two harness runs numbering their steps
+    // from 1 is the normal case, not a collision.
+    expect((await post(first, [toolCall(1)])).statusCode).toBe(201);
+    expect((await post(second, [toolCall(1)])).statusCode).toBe(201);
+    expect(await countSteps(first)).toBe(1);
+    expect(await countSteps(second)).toBe(1);
+  });
+
+  it('leaves the server loop alone: agent-run steps carry no key and are not deduplicated', async () => {
+    // `client_step_id` is NULL for every step the agent loop writes, and Postgres
+    // treats NULLs as distinct in a unique index. If it did not, the second step of
+    // every agent run would collide with the first.
+    const created = await createRun({ options: { scenario: 'tool-call-once' } });
+    const runId = created.json().runId as string;
+    await waitForRun(runId);
+    const rows = await ctx.sql`select client_step_id from agent_run_steps where run_id = ${runId}`;
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.every((row) => row.client_step_id === null)).toBe(true);
+  });
+});
+
 // ------------------------------------------------- the M11 harness round trip ----
 
 /**
@@ -679,7 +920,7 @@ describe('a harness run driven from the browser', () => {
       method: 'POST',
       url: `/api/v1/model/runs/${runId}/steps`,
       headers: { ...WRITE_HEADERS, cookie },
-      payload: { steps },
+      payload: { steps: steps.map(withKey) },
     });
 
   it('interleaves server model_call rows with client tool rows and closes on final', async () => {

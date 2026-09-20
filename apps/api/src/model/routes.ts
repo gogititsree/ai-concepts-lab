@@ -29,23 +29,30 @@ import { AppError, isAppError, notFound, rateLimited } from '../lib/errors.js';
 import {
   countRunFinished,
   countStructuredRetries,
+  logClientReportedStep,
+  logModelCallContent,
   modelErrorClass,
   observeModelCall,
   setModelProviderUp,
+  type RunLogContext,
 } from '../plugins/metrics.js';
 import { FixedWindowLimiter } from '../plugins/rate-limit.js';
 import { runAgentLoop } from './agentLoop.js';
 import { createProvider, modelUnavailable, type ModelProvider } from './provider.js';
 import { RunControllerRegistry, RunEventBus, RunSemaphore, type RunEvent } from './runEvents.js';
 import {
+  appendReportedStep,
   findOwnedRun,
   isTerminal,
   listRuns,
   loadRun,
   loadRunSummary,
   loadStepsAfter,
+  lockRunForUpdate,
   markCancelled,
   markCompleted,
+  nextStepIndex,
+  replayReportedStep,
   RunRecorder,
   startRun,
   toRunStep,
@@ -326,6 +333,12 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
           ownsRun = true;
         }
 
+        // M16: what every structured line from this request carries. `request.log` is
+        // the request-scoped child Fastify has already bound `reqId` onto, and
+        // `agent_runs.request_id` is the same `String(request.id)` — that pairing is
+        // what makes a Loki search by request id reach the trace.
+        const logBase: RunLogContext = { logger: request.log, runId: recorder.runId };
+
         // Cancelling in the browser must actually stop the inference, not just stop
         // listening to it: a 45-second call left running holds the model and the socket.
         const controller = new AbortController();
@@ -352,32 +365,32 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             response = await provider.chat(chatRequest, controller.signal);
             attempts = [response];
           }
-          // M14: one observation per model call, so a structured retry is two points on
-          // the latency histogram rather than one slow one.
-          for (const attempt of attempts) {
-            observeModelCall({
-              provider: provider.name,
-              model,
-              outcome: 'success',
-              durationMs: attempt.latencyMs,
-            });
-          }
+          // The success-path metric and log pair are emitted below, once each
+          // `model_call` row exists and can be named by its `stepIndex`.
         } catch (error) {
           settled = true;
           const appError = isAppError(error)
             ? error
             : new AppError(500, 'INTERNAL_ERROR', 'Model call failed');
+          const errorStep = await recorder.step({
+            kind: 'error',
+            iteration: 1,
+            content: appError.message,
+            isError: true,
+          });
           observeModelCall({
             provider: provider.name,
             model,
             outcome: modelErrorClass(appError.code),
             durationMs: Date.now() - callStartedAt,
-          });
-          await recorder.step({
-            kind: 'error',
-            iteration: 1,
-            content: appError.message,
-            isError: true,
+            log: {
+              ...logBase,
+              stepIndex: errorStep.stepIndex,
+              iteration: 1,
+              promptTokens: 0,
+              completionTokens: 0,
+              errorCode: appError.code,
+            },
           });
           if (ownsRun) {
             const status = appError.code === 'REQUEST_ABORTED' ? 'cancelled' : 'failed';
@@ -392,7 +405,17 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
               errorCode: appError.code,
               errorMessage: appError.message,
             });
-            countRunFinished(structured ? 'structured' : 'prompt', status, 1);
+            countRunFinished(structured ? 'structured' : 'prompt', status, 1, {
+              ...logBase,
+              provider: provider.name,
+              model,
+              errorCode: appError.code,
+              toolCalls: 0,
+              parseFailures: 0,
+              promptTokens: 0,
+              completionTokens: 0,
+              latencyMs: 0,
+            });
           }
           throw appError;
         }
@@ -406,7 +429,7 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
         // always recorded.
         const baseIteration = iteration ?? 1;
         for (const [index, attempt] of attempts.entries()) {
-          await recorder.step({
+          const row = await recorder.step({
             kind: 'model_call',
             iteration: baseIteration + index,
             content: attempt.message.content,
@@ -415,6 +438,28 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             completionTokens: attempt.usage.completionTokens,
             raw: attempt.providerMeta ?? null,
           });
+          // M14: one observation per model call, so a structured retry is two points on
+          // the latency histogram rather than one slow one. M16: and one log line each,
+          // for the same reason — "it only worked the second time" should be as visible
+          // in the log as it is in the trace.
+          observeModelCall({
+            provider: provider.name,
+            model,
+            outcome: 'success',
+            durationMs: attempt.latencyMs,
+            log: {
+              ...logBase,
+              stepIndex: row.stepIndex,
+              iteration: baseIteration + index,
+              promptTokens: attempt.usage.promptTokens,
+              completionTokens: attempt.usage.completionTokens,
+            },
+          });
+          logModelCallContent(request.log, recorder.runId, row.stepIndex, () => ({
+            systemPrompt: firstSystemPrompt(chatRequest),
+            userPrompt: lastUserPrompt(chatRequest),
+            completion: attempt.message.content,
+          }));
         }
 
         const totals = rollup(attempts);
@@ -434,8 +479,20 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             modelLatencyMsTotal: totals.latencyMs,
             finalOutput: response.message.content,
           });
-          // M14: prompt/structured runs finish here, not in the agent loop.
-          countRunFinished(structured ? 'structured' : 'prompt', 'completed', totals.iterations);
+          // M14: prompt/structured runs finish here, not in the agent loop. M16: the
+          // `run_finished` line comes off the same `totals` that were just written to
+          // `agent_runs`, so the log and the row cannot disagree.
+          countRunFinished(structured ? 'structured' : 'prompt', 'completed', totals.iterations, {
+            ...logBase,
+            provider: provider.name,
+            model,
+            errorCode: null,
+            toolCalls: totals.toolCalls,
+            parseFailures: totals.parseFailures,
+            promptTokens: totals.promptTokens,
+            completionTokens: totals.completionTokens,
+            latencyMs: totals.latencyMs,
+          });
         } else {
           // Appending to a run somebody else is driving: M11's in-browser harness, which
           // opened a `harness` run and calls this endpoint once per iteration.
@@ -748,6 +805,49 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
      * interleave step indices with the loop's own), it must still be running, and the
      * payload is capped at 20 steps of 8 KB each by the schema. A learner's loop with a
      * bug in it should cost a 400, not a table.
+     *
+     * ## Idempotency (M16)
+     *
+     * It used to have a fifth property it did not have: three identical posts made
+     * three steps. `agent_run_steps` has `UNIQUE (run_id, step_index)`, which looks
+     * like replay protection, but the **server** allocates `step_index`, so a replay
+     * simply took the next free one and the constraint could never fire. The exposure
+     * was low only because the worker does not retry — and a retry is the obvious next
+     * change, at which point one network blip duplicates steps in the learner's trace.
+     *
+     * Each step now carries a client-chosen `clientStepId`, unique within the run and
+     * enforced by an index; the reasoning for that shape is in
+     * `packages/shared/src/model.ts` next to the schema. Three properties follow:
+     *
+     *  - **A replay is a no-op that answers like the original.** Not a 409. The whole
+     *    point is that a retry is *safe*; a caller that has to distinguish "accepted"
+     *    from "already had it" has not been given idempotency, it has been given a new
+     *    error to handle. The response body is the same steps with the same indices.
+     *  - **A reused id carrying different content is a 409.** That is not a retry, it
+     *    is two different steps claiming one identity, and answering with the first
+     *    would hide a client bug behind the mechanism meant to make client bugs
+     *    harmless.
+     *  - **The batch is one transaction**, with the run row locked for the duration, so
+     *    a partially-applied batch is not a state this endpoint can be in and two
+     *    concurrent posts cannot race for the same `step_index`. The rollup update and
+     *    the `final` step's status change are inside it too: a batch either lands whole
+     *    or not at all, rollups included.
+     *
+     * `step_index` remains the server's to assign, and deliberately so. The client says
+     * *which step this is*, never *where it goes* — the server interleaves the client's
+     * tool rows with its own `model_call` rows, and only it knows the order they
+     * arrived in.
+     *
+     * TODO(web): `useHarnessRunner.reportSteps` must put a `clientStepId` on every step
+     * it posts — a non-empty string of at most 64 characters, unique within the run and
+     * **stable across retries of the same step**. `crypto.randomUUID()` minted once
+     * where the step is created (not where it is posted) is the simplest correct
+     * choice; a per-run counter such as `` `${runId}:${n}` `` also works. What does not
+     * work is generating it inside the retry, which would make every attempt a new
+     * step. `harnessCore`'s four `onStep({...})` literals are where the id has to be
+     * born, because that is the moment a step exists; the posting queue only forwards
+     * it. See `docs/adr/0007` §5. Until then `apps/web` will not typecheck, which is
+     * the intended signal rather than a runtime 400 nobody sees.
      */
     securedRoutes.post(
       '/model/runs/:id/steps',
@@ -761,33 +861,25 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
       async (request, reply) => {
         const { user } = authContext(request);
         const runId = request.params.id;
-        const owned = await findOwnedRun(app.db, user.id, runId);
-        if (!owned) throw notFound(`Run ${runId} not found`);
-        if (owned.kind !== 'harness') {
-          throw new AppError(
-            409,
-            'RUN_KIND_MISMATCH',
-            `Run ${runId} is a "${owned.kind}" run; only a harness run accepts client-reported steps.`,
-          );
-        }
-        if (isTerminal(owned.status)) {
-          throw new AppError(409, 'RUN_NOT_RUNNING', `Run ${runId} has already finished.`);
-        }
+        const logBase: RunLogContext = { logger: request.log, runId };
 
-        const recorder = await RunRecorder.forExistingRun(app.db, runId);
-        const written: RunStep[] = [];
-        const totals = {
-          iterations: 0,
-          promptTokens: 0,
-          completionTokens: 0,
-          latencyMs: 0,
-          toolCalls: 0,
-          parseFailures: 0,
-        };
-        let finalOutput: string | null = null;
-
-        for (const step of request.body.steps) {
-          const row = await recorder.step({
+        // Everything the client's batch touches happens in here. `app.db.transaction`
+        // rolls back on any throw, including the `AppError`s below, so a rejected batch
+        // cannot leave a step behind.
+        const applied = await app.db.transaction(async (tx) => {
+          const owned = await lockRunForUpdate(tx, user.id, runId);
+          if (!owned) throw notFound(`Run ${runId} not found`);
+          if (owned.kind !== 'harness') {
+            throw new AppError(
+              409,
+              'RUN_KIND_MISMATCH',
+              `Run ${runId} is a "${owned.kind}" run; only a harness run accepts client-reported steps.`,
+            );
+          }
+          // Mapping the wire shape onto a step row, in one place: the replay-only path
+          // below has to build the identical object or the fingerprints will not match.
+          const toStepInput = (step: (typeof request.body.steps)[number]) => ({
+            clientStepId: step.clientStepId,
             kind: step.kind,
             iteration: step.iteration,
             content: step.content ?? null,
@@ -802,37 +894,113 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             completionTokens: step.completionTokens ?? null,
             raw: { reportedBy: 'client' },
           });
-          const runStep = toRunStep(row);
-          written.push(runStep);
-          bus.publish(runId, { type: 'step', step: runStep });
 
-          if (step.kind === 'model_call') {
-            totals.iterations += 1;
-            totals.promptTokens += step.promptTokens ?? 0;
-            totals.completionTokens += step.completionTokens ?? 0;
-            totals.latencyMs += step.latencyMs ?? 0;
+          const reuseConflict = (clientStepId: string, stepIndex: number): AppError =>
+            new AppError(
+              409,
+              'IDEMPOTENCY_KEY_REUSED',
+              `clientStepId "${clientStepId}" was already used in run ${runId} for a different step. An id names one step for the life of the run; send a new one.`,
+              { clientStepId, stepIndex },
+            );
+
+          if (isTerminal(owned.status)) {
+            // A finished run cannot take new steps — but it can still recognise its
+            // own. The worker's very last post is the `final` that closed the run, so
+            // the retry most likely to happen is the one that arrives here, and
+            // answering it with a failure would make a successful run look broken.
+            const replays: { step: RunStep; created: boolean }[] = [];
+            for (const step of request.body.steps) {
+              const outcome = await replayReportedStep(tx, runId, toStepInput(step));
+              if (outcome.status === 'conflict') {
+                throw reuseConflict(step.clientStepId, outcome.row.stepIndex);
+              }
+              if (outcome.status === 'missing') {
+                throw new AppError(409, 'RUN_NOT_RUNNING', `Run ${runId} has already finished.`);
+              }
+              replays.push({ step: toRunStep(outcome.row), created: false });
+            }
+            return { written: replays, owned, completed: false, summary: null };
           }
-          if (step.kind === 'tool_call') {
-            totals.toolCalls += 1;
-            if (step.parseOk === false) totals.parseFailures += 1;
+
+          const written: { step: RunStep; created: boolean }[] = [];
+          const totals = {
+            iterations: 0,
+            promptTokens: 0,
+            completionTokens: 0,
+            latencyMs: 0,
+            toolCalls: 0,
+            parseFailures: 0,
+          };
+          let finalOutput: string | null = null;
+          // Read once and advanced in memory: the run row is locked, so nobody else is
+          // allocating indices for this run while this transaction runs.
+          let stepIndex = await nextStepIndex(tx, runId);
+
+          for (const step of request.body.steps) {
+            const outcome = await appendReportedStep(tx, runId, stepIndex, toStepInput(step));
+
+            if (outcome.status === 'conflict') {
+              throw reuseConflict(step.clientStepId, outcome.row.stepIndex);
+            }
+
+            const created = outcome.status === 'created';
+            written.push({ step: toRunStep(outcome.row), created });
+            if (!created) continue;
+
+            // Only a step that was actually inserted moves anything. A replay that
+            // added to the rollups would make `agent_runs` disagree with its own trace
+            // — exactly the failure the idempotency key exists to prevent, so
+            // reintroducing it one layer up would be a poor joke.
+            stepIndex += 1;
+            if (step.kind === 'model_call') {
+              totals.iterations += 1;
+              totals.promptTokens += step.promptTokens ?? 0;
+              totals.completionTokens += step.completionTokens ?? 0;
+              totals.latencyMs += step.latencyMs ?? 0;
+            }
+            if (step.kind === 'tool_call') {
+              totals.toolCalls += 1;
+              if (step.parseOk === false) totals.parseFailures += 1;
+            }
+            if (step.kind === 'final') finalOutput = step.content ?? '';
           }
-          if (step.kind === 'final') finalOutput = step.content ?? '';
+
+          await RunRecorder.forNewRun(tx, runId).accumulate(totals);
+
+          // A `final` step closes the run. Without this the harness run would stay
+          // `running` forever and its SSE stream would never terminate. `markCompleted`
+          // only applies to a `running` run, so a replayed `final` is a no-op here too.
+          const completed = finalOutput !== null && (await markCompleted(tx, runId, finalOutput));
+          const summary = completed ? await loadRunSummary(tx, runId) : null;
+          return { written, owned, completed, summary };
+        });
+
+        // Side effects that must wait for the commit: an SSE subscriber told about a
+        // step that then rolled back would be looking at a row nobody else can see.
+        for (const { step, created } of applied.written) {
+          if (!created) continue;
+          bus.publish(runId, { type: 'step', step });
+          logClientReportedStep(logBase, step, applied.owned);
         }
-
-        await recorder.accumulate(totals);
-
-        // A `final` step closes the run. Without this the harness run would stay
-        // `running` forever and its SSE stream would never terminate.
-        if (finalOutput !== null && (await markCompleted(app.db, runId, finalOutput))) {
-          const summary = await loadRunSummary(app.db, runId);
-          if (summary) bus.publish(runId, { type: 'end', run: summary });
+        if (applied.completed) {
+          if (applied.summary) bus.publish(runId, { type: 'end', run: applied.summary });
           // M14: a harness run's terminal status is decided here, by the browser's own
           // loop reporting its `final` step. `iterationCount` comes from the row because
           // this request only saw the last batch of steps.
-          countRunFinished('harness', 'completed', summary?.iterationCount ?? 0);
+          countRunFinished('harness', 'completed', applied.summary?.iterationCount ?? 0, {
+            ...logBase,
+            provider: applied.owned.provider,
+            model: applied.owned.model,
+            errorCode: null,
+            toolCalls: applied.summary?.toolCallCount ?? 0,
+            parseFailures: applied.summary?.toolParseFailureCount ?? 0,
+            promptTokens: applied.summary?.promptTokensTotal ?? 0,
+            completionTokens: applied.summary?.completionTokensTotal ?? 0,
+            latencyMs: applied.summary?.modelLatencyMsTotal ?? 0,
+          });
         }
 
-        return reply.code(201).send({ steps: written });
+        return reply.code(201).send({ steps: applied.written.map((entry) => entry.step) });
       },
     );
   });

@@ -275,6 +275,11 @@ describe('a tool that misbehaves', () => {
       },
     });
     const warn = vi.fn();
+    // A full pino-shaped logger: since M16 the loop writes a structured line per model
+    // call, tool call and terminal state through this object, so a stub with only
+    // `warn` on it would blow up inside the loop and turn this run into a failed one —
+    // which is exactly how this test caught the change.
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
     const recorder = new MemoryRecorder();
     const result = await runAgentLoop({
       db: {} as Db,
@@ -287,7 +292,7 @@ describe('a tool that misbehaves', () => {
       tools: [broken],
       maxIterations: 3,
       options: { scenario: 'tool-call-once' },
-      logger: { warn },
+      logger,
     });
     expect(result.status).toBe('completed');
     expect(recorder.kind('tool_result')[0]?.toolResult).toMatchObject({ code: 'TOOL_ERROR' });
