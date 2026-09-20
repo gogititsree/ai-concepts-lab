@@ -42,13 +42,23 @@ jobs:
         run: |
           url="${INPUT_URL:-$VAR_URL}"
           if [ -z "$url" ]; then
-            echo "::error::APP_URL repository variable is not set and no override was given"
-            exit 1
+            # Nothing is deployed yet, so there is nothing to check. Skip, do not fail.
+            #
+            # This used to `exit 1`, which turned "you have not created the Render service"
+            # into a red run every thirty minutes -- 48 failures a day, none of them an
+            # outage. A monitor that cries wolf on its own configuration is worse than no
+            # monitor: you learn to ignore the badge, and then you ignore the real one.
+            # docs/github-setup.md is what sets APP_URL; until then this is a no-op.
+            echo "::notice::APP_URL is not set, so there is no deployment to check. Skipping. See docs/github-setup.md."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
           echo "url=${url%/}" >> "$GITHUB_OUTPUT"
 
       - name: Check /health
         id: health
+        if: steps.target.outputs.configured == 'true'
         env:
           APP_URL: ${{ steps.target.outputs.url }}
         run: |
@@ -96,7 +106,7 @@ jobs:
         id: sli
         # Skipped when the service is already down: the SLI call would fail for the same
         # reason and would only add noise to an incident that is already filed.
-        if: steps.health.outputs.down == 'false'
+        if: steps.target.outputs.configured == 'true' && steps.health.outputs.down == 'false'
         env:
           APP_URL: ${{ steps.target.outputs.url }}
           # `/ops/sli` requires a session *or* this read-only bearer token — see
@@ -133,7 +143,7 @@ jobs:
           echo "breach=$breach" >> "$GITHUB_OUTPUT"
 
       - name: Open or update the incident issue
-        if: steps.health.outputs.down == 'true' || steps.sli.outputs.breach == 'true'
+        if: steps.target.outputs.configured == 'true' && (steps.health.outputs.down == 'true' || steps.sli.outputs.breach == 'true')
         env:
           GH_TOKEN: ${{ github.token }}
           APP_URL: ${{ steps.target.outputs.url }}
@@ -201,7 +211,7 @@ jobs:
           fi
 
       - name: Fail the run so the workflow badge goes red
-        if: steps.health.outputs.down == 'true' || steps.sli.outputs.breach == 'true'
+        if: steps.target.outputs.configured == 'true' && (steps.health.outputs.down == 'true' || steps.sli.outputs.breach == 'true')
         run: |
           echo "::error::Uptime check failed — see the incident issue."
           exit 1
