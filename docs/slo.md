@@ -41,6 +41,18 @@ ignore it.
 > uptime workflow and this SLO are already written against it, so adding the model check
 > later changes no consumer. What matters for paging is the rule "only `down` pages", and
 > that holds either way.
+>
+> Note (M15): **`down` no longer means only "the database is unreachable".** `/health`
+> gained a second check, `checks.schema`, which compares the columns drizzle declares
+> with the columns Postgres has, and a mismatch is `down`. That widening is deliberate
+> and it is the prevent/detect action item from
+> `docs/postmortems/2026-09-20-rename-final-output.md`: during that incident `/health`
+> reported `ok` for the entire outage while every agent-run route answered 500, which is
+> precisely an availability SLI failing to measure availability. The budget cost is
+> nil in the good case (the check is a cached `information_schema` lookup that is
+> silent when the schema matches) and, in the bad case, it now *correctly* consumes
+> budget for an outage that previously consumed none. Read `checks.db.ok` to tell the
+> two kinds of `down` apart.
 
 **Error budget:** 1 % of 30 days = **7 h 12 min**. Measured against the 30-minute cron,
 that is about 14 consecutive failed checks.

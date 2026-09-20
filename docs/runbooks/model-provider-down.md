@@ -13,8 +13,21 @@ this does **not** page as an outage.
 
 ## Symptoms
 
-- The playground and the agent exercise show the "model unavailable" banner.
-- `POST /api/v1/model/chat` and `POST /api/v1/model/runs` answer **503 `MODEL_UNAVAILABLE`**.
+- The playground and the agent exercise show the "model unavailable" banner — **but only
+  after a page load.** Measured in M15: on a page that was already open when the provider
+  died, the banner never appeared at all in two minutes of watching, because
+  `useModelHealth` has no `refetchInterval` and `refetchOnWindowFocus` is off globally.
+  *Do not use the absence of the banner as evidence that the provider is up.* Reload
+  first. (Action item 1 in `docs/postmortems/2026-09-20-ollama-down-mid-run.md`.)
+- `POST /api/v1/model/chat` answers **503 `MODEL_UNAVAILABLE`**.
+- `POST /api/v1/model/runs` answers **202 `{"status":"running"}`** and *then* fails the
+  run. This is deliberate — the run row and its partial trace are more useful than a bare
+  503 — but it means a healthy-looking 202 is not evidence of anything. Find the run:
+
+  ```sql
+  select id, status, error_code, error_message, finished_at
+  from agent_runs order by started_at desc limit 5;
+  ```
 - On `/ops`: the **Model provider** tile is red, `MODEL_UNAVAILABLE` leads **Error codes**,
   and the run success rate drops while `failed` grows in the outcome bar.
 - In Grafana: `model_provider_up` steps to 0; `model_call_errors_total{code="unavailable"}`
@@ -52,6 +65,7 @@ grep -E '^(MODEL_PROVIDER|OLLAMA_BASE_URL|OLLAMA_CHAT_MODEL)=' .env
 | (1) works, (4) says `provider: "none"`             | The app was started with `MODEL_PROVIDER=none`. → **Mitigate C**                   |
 | (4) says `ok: false` with `Could not reach…`       | `OLLAMA_BASE_URL` points somewhere else, or a firewall is in the way.              |
 | `model_provider_up` is 0 but curl works            | The scrape is stale (≤ 15 s) or the API cannot reach Ollama though your shell can. |
+| (1), (2) and (4) all look fine but calls 500       | The model cannot be **loaded**, usually out of memory. → **Mitigate D** (M15)       |
 
 ## Mitigate
 
@@ -84,24 +98,67 @@ purpose (decision 1 in `docs/07-open-decisions.md`). If the alert is firing agai
 deployment, the alert is wrong — its query already excludes `provider="none"`, so check
 what the deployment is actually reporting before changing anything.
 
+**D — Ollama is running, the tag is listed, and calls still fail with
+`"The model server returned HTTP 500."`** The model cannot be loaded. On this 8 GB
+machine that is almost always memory, and it was observed for real in M15:
+
+```
+ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size 1941258240
+llama_model_load: error loading model: unable to allocate CPU_REPACK buffer
+```
+
+`ollama ps` shows an empty table — nothing is loaded — while `/api/tags` and therefore
+`model/health` and `model_provider_up` all say everything is fine. Free memory in this
+order, retrying the load after each step: `pnpm obs:down` (the observability profile is
+the usual culprit — see `docs/runbooks/slow-inference.md`), kill any orphaned
+`llama-server` process left behind by a hard kill, then `wsl --shutdown` to reclaim
+Docker's VM. Then `ollama run gemma4:latest 'say ready'` and only believe it when it
+answers.
+
 **If it cannot be fixed now:** nothing to switch off. The app already degrades correctly —
 the banner explains it, modules 1–3 and 6's scripted checks are unaffected, and Module 6
 is completable with no model at all.
 
 ## Verify
 
+> **`model/health: ok` does not mean inference works, and this has bitten once.** The
+> probe asks Ollama's `/api/tags` whether the configured tag exists. It does not ask
+> whether the model can be *loaded*. During M15's recovery, `/api/v1/model/health`
+> returned `{"ok":true}` and `model_provider_up` read 1 — and the Grafana alert went
+> green — for **3 minutes 40 seconds** while every real call returned
+> `503 MODEL_UNAVAILABLE / "The model server returned HTTP 500."`, because `ollama serve`
+> could not allocate the model's 1.94 GB repack buffer:
+>
+> ```
+> ggml_backend_cpu_buffer_type_alloc_buffer: failed to allocate buffer of size 1941258240
+> llama_model_load: error loading model: unable to allocate CPU_REPACK buffer
+> ```
+>
+> The usual cause on an 8 GB machine is memory pressure, and the usual *source* of that
+> pressure is embarrassing: `pnpm obs:up` (Prometheus + Grafana + Loki + Promtail) plus
+> Docker's WSL VM is roughly the margin this model needs. Check `ollama ps` — an empty
+> table after a "successful" restart means nothing is loaded — and read the `ollama serve`
+> console for `alloc_tensor_range`. Free memory (`pnpm obs:down`, kill any orphaned
+> `llama-server`, `wsl --shutdown`) and load again. **Step 3 below is not optional, and
+> this is why.**
+
 ```bash
-# The probe the gauge is built on.
+# 1. The probe the gauge is built on. Necessary, not sufficient — see the box above.
 curl -s http://localhost:3000/api/v1/model/health | jq '.ok, .models'
 
-# The gauge itself. Give it one scrape interval (15 s) to flip.
+# 2. The gauge itself. Give it one scrape interval (15 s) to flip.
 curl -s -H "Authorization: Bearer $(grep '^METRICS_TOKEN=' .env | cut -d= -f2-)" \
   http://localhost:3000/metrics | grep '^model_provider_up'
+
+# 3. REQUIRED. One real generation. The only step that proves the model can serve;
+#    everything above proves only that something is listening and the tag is listed.
+ollama run gemma4:latest 'say ready'
 ```
 
-Then do a real end-to-end check rather than trusting the probe: run one Module 4 prompt and
-confirm it returns, and reload `/ops` — the **Model provider** tile should be green and the
-next run should land in `completed`.
+Then do a real end-to-end check through the app rather than trusting the probe: run one
+Module 4 prompt and confirm it returns, and **reload** `/ops` and the exercise page — the
+banner will not clear on its own, see Symptoms. The **Model provider** tile should be
+green and the next run should land in `completed`.
 
 In Grafana, the `lab-alert-provider-down` rule returns to **Normal** within one evaluation
 (1 min) plus the 5-minute pending period it no longer needs.
@@ -117,5 +174,13 @@ In Grafana, the `lab-alert-provider-down` rule returns to **Normal** within one 
   rather than down, revisit it.
 - If the load penalty was the visible problem rather than the outage, `keep_alive` is the
   knob — see `docs/runbooks/slow-inference.md`.
+- **A failed run leaves no log line.** Everything you need is in `agent_runs` /
+  `agent_run_steps` and in Prometheus; Loki will have only HTTP access lines, because the
+  per-model-call structured logging that `docs/05-quality-and-ops.md` specifies is not yet
+  implemented (action item 6 in the postmortem below). Do not waste time grepping logs for
+  a run id.
 - Recurring? Write it up in `docs/postmortems/` and add an action item. Two of these in a
-  month is a pattern, not bad luck.
+  month is a pattern, not bad luck. The worked example is
+  `docs/postmortems/2026-09-20-ollama-down-mid-run.md` (M15), which is where the three
+  bugs this runbook now warns about were found: the banner that does not flip, the 202
+  from `/model/runs`, and `model/health` reporting `ok` for a model that cannot load.
