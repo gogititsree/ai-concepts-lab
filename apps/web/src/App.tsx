@@ -8,6 +8,7 @@ import { LessonPage } from './routes/LessonPage';
 import { ModuleOverviewPage } from './routes/ModuleOverviewPage';
 import { ModulesPage } from './routes/ModulesPage';
 import { NotFound } from './routes/NotFound';
+import { OpsPage } from './routes/OpsPage';
 import { QuizPage } from './routes/QuizPage';
 import { LoginPage } from './routes/auth/LoginPage';
 import { MfaPage } from './routes/auth/MfaPage';
@@ -75,6 +76,16 @@ export function App() {
           element={
             <RequireAuth>
               <RunDetailPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* M14: any signed-in learner can see it; this is a teaching app, not a tenant. */}
+        <Route
+          path="/ops"
+          element={
+            <RequireAuth>
+              <OpsPage />
             </RequireAuth>
           }
         />
