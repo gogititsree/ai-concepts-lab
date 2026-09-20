@@ -512,12 +512,48 @@ export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
  * Hard limits everywhere, because this is the one endpoint where the *client* decides
  * what goes into the trace table. A learner's harness with a bug in its own loop must
  * cost a 400, not a table full of rows.
+ *
+ * ## `clientStepId`: why the client has to name its own steps (M16)
+ *
+ * `agent_run_steps` has `UNIQUE (run_id, step_index)`, which looks like replay
+ * protection and is not: the **server** allocates `step_index`, so a re-sent step gets
+ * the next free index and the constraint can never fire. Three identical posts made
+ * three rows. Nothing retried today, so nothing had noticed — but a retry is the
+ * obvious next change to the worker, and the first network blip after it would
+ * duplicate steps in the learner's trace.
+ *
+ * So each step carries an **opaque, client-chosen identifier**, unique within the run,
+ * and the server enforces `UNIQUE (run_id, client_step_id)`. Re-sending a step with an
+ * id the run has already seen is a **no-op that returns the original row**: a retry is
+ * safe, not merely rejected.
+ *
+ * **Opaque, not a sequence number.** A monotonic counter was the other candidate and
+ * the worker already has one, but it would put a second position-like number next to
+ * `stepIndex` — and they legitimately differ, because the server writes its own
+ * `model_call` rows into the same harness run through `POST /model/chat`. Two
+ * disagreeing indices on one row is a trap for whoever reads the trace next, and a
+ * sequence number also invites a client to believe it controls ordering, which is the
+ * one thing this endpoint must not concede. An opaque id claims only "this is the same
+ * step I sent before" — which is the entire contract.
+ *
+ * **Per step, not per batch.** A batch is not a stable unit: after a partial failure
+ * the worker's next attempt may carry a different window of steps (send 1–2, then send
+ * 1–3). A per-batch key would have to reject that whole batch or re-insert its first
+ * two steps. A per-step key adds only the new one. It is also the only form that can be
+ * enforced by a database constraint rather than by bookkeeping.
+ *
+ * Format is deliberately unspecified beyond "a non-empty string of at most 64
+ * characters"; `crypto.randomUUID()` and `` `${runId}:${n}` `` are both fine. The
+ * server never parses it.
  */
 export const REPORTED_STEPS_MAX = 20;
 export const REPORTED_STEP_MAX_BYTES = 8 * 1024;
+export const CLIENT_STEP_ID_MAX_CHARS = 64;
 
 export const ReportedStepSchema = z
   .object({
+    /** Stable across retries of the same step, unique within the run. See above. */
+    clientStepId: z.string().min(1).max(CLIENT_STEP_ID_MAX_CHARS),
     kind: RunStepKindSchema,
     iteration: z.number().int().min(0).max(AGENT_MAX_ITERATIONS_CAP),
     content: z.string().max(CHAT_MAX_CONTENT_CHARS).nullish(),
@@ -543,9 +579,29 @@ export const ReportedStepSchema = z
   });
 export type ReportedStep = z.infer<typeof ReportedStepSchema>;
 
+/**
+ * The batch is applied in **one transaction**, so a mid-batch failure leaves nothing
+ * behind: a partially-applied batch is not a state this endpoint can be in. The
+ * duplicate check below is the cheap half of that — a batch that repeats an id inside
+ * itself is a client bug, and catching it in the schema means the transaction never
+ * starts.
+ */
 export const ReportStepsRequestSchema = z
   .object({ steps: z.array(ReportedStepSchema).min(1).max(REPORTED_STEPS_MAX) })
-  .strict();
+  .strict()
+  .superRefine((body, ctx) => {
+    const seen = new Set<string>();
+    for (const [index, step] of body.steps.entries()) {
+      if (seen.has(step.clientStepId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['steps', index, 'clientStepId'],
+          message: `duplicate clientStepId "${step.clientStepId}" within one batch`,
+        });
+      }
+      seen.add(step.clientStepId);
+    }
+  });
 export type ReportStepsRequest = z.infer<typeof ReportStepsRequestSchema>;
 
 export const ReportStepsResponseSchema = z.object({ steps: z.array(RunStepSchema) });

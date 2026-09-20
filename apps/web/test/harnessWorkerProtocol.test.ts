@@ -214,7 +214,13 @@ describe('steps and logs', () => {
     const { handle, worker, recorded } = drive();
     worker.emit({
       type: 'step',
-      step: { kind: 'tool_call', iteration: 1, toolName: 'calculator', isError: false },
+      step: {
+        clientStepId: 'c1',
+        kind: 'tool_call',
+        iteration: 1,
+        toolName: 'calculator',
+        isError: false,
+      },
     });
     worker.emit({ type: 'log', level: 'log', text: 'iteration 1' });
     worker.emit({ type: 'log', level: 'error', text: 'oops' });

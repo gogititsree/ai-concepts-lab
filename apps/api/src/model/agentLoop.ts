@@ -14,10 +14,12 @@ import type { Db } from '../db/client.js';
 import { AppError, isAppError } from '../lib/errors.js';
 import {
   countRunFinished,
-  countToolParseFailure,
+  logModelCallContent,
   modelErrorClass,
   observeModelCall,
+  observeToolCall,
   observeToolExecution,
+  type TelemetryLogger,
 } from '../plugins/metrics.js';
 import type { ModelProvider } from './provider.js';
 import { toRunStep, type StepWriter } from './runs.js';
@@ -83,7 +85,13 @@ export interface AgentLoopInput {
   toolTimeoutMs?: number;
   /** Called after each step is persisted. This is what feeds the SSE stream. */
   onStep?: (step: RunStep) => void;
-  logger?: { warn: (obj: unknown, msg?: string) => void };
+  /**
+   * The **request-scoped** logger, which Fastify has already bound `reqId` onto. That
+   * binding is the whole correlation story: `agent_runs.request_id` holds the same
+   * value, so one Loki query by request id reaches the run and the run reaches the
+   * trace. A root logger here would still work; the lines would just be orphaned.
+   */
+  logger?: TelemetryLogger;
 }
 
 export interface AgentLoopResult {
@@ -213,11 +221,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let lastAssistantText = '';
   let stepIndexUsed = 0;
 
-  const emit = async (step: Parameters<StepWriter['step']>[0]): Promise<void> => {
+  /** Returns the index the step landed at, which is what the log lines are keyed by. */
+  const emit = async (step: Parameters<StepWriter['step']>[0]): Promise<number> => {
     const row = await recorder.step(step);
     stepIndexUsed = row.stepIndex;
     onStep?.(toRunStep(row));
+    return row.stepIndex;
   };
+
+  /** The common half of every structured line this loop writes. `undefined` = no logger. */
+  const logBase = logger ? { logger, runId: recorder.runId } : undefined;
 
   const settle = async (
     status: AgentLoopResult['status'],
@@ -237,7 +250,25 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     // the max-iterations bounded outcome — is counted exactly once. `runAgentLoop` is
     // only ever driven for an `agent` run; prompt/structured/harness runs are counted in
     // `model/routes.ts` where they finish.
-    countRunFinished('agent', status, totals.iterationCount);
+    //
+    // M16: and the `run_finished` line, from the same `totals` object that was just
+    // written to `agent_runs` a line above.
+    countRunFinished(
+      'agent',
+      status,
+      totals.iterationCount,
+      logBase && {
+        ...logBase,
+        provider: provider.name,
+        model,
+        errorCode,
+        toolCalls: totals.toolCallCount,
+        parseFailures: totals.toolParseFailureCount,
+        promptTokens: totals.promptTokensTotal,
+        completionTokens: totals.completionTokensTotal,
+        latencyMs: totals.modelLatencyMsTotal,
+      },
+    );
     return { status, finalOutput, ...totals, errorCode, errorMessage };
   };
 
@@ -259,14 +290,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           },
           controller.signal,
         );
-        // M14: the latency SLI. `response.latencyMs` is the adapter's own measurement of
-        // the call, which is the number the trace already carries.
-        observeModelCall({
-          provider: provider.name,
-          model,
-          outcome: 'success',
-          durationMs: response.latencyMs,
-        });
+        // The metric+log pair is emitted a little further down, after the `model_call`
+        // row exists — the line carries its `stepIndex`, which is the field that makes
+        // a log search land on a row in `agent_run_steps` rather than near one.
       } catch (error) {
         // An abort surfaces from the provider as whatever *it* throws; the reason we
         // record comes from our own flag, not from guessing at the message.
@@ -276,26 +302,48 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             model,
             outcome: 'aborted',
             durationMs: Date.now() - callStartedAt,
+            // No step was written for an aborted call, so `stepIndex` is honestly null
+            // rather than pointing at the previous step's row.
+            log: logBase && {
+              ...logBase,
+              stepIndex: null,
+              iteration,
+              promptTokens: 0,
+              completionTokens: 0,
+              errorCode: stopped.reason === 'deadline' ? 'RUN_TIMEOUT' : 'RUN_CANCELLED',
+            },
           });
           break;
         }
         const appError = isAppError(error)
           ? error
           : new AppError(500, 'INTERNAL_ERROR', 'The model call failed');
-        // A failed call has no `latencyMs` of its own, so the wall clock around it is
-        // the honest measurement — and for a timeout it is the interesting one.
-        observeModelCall({
-          provider: provider.name,
-          model,
-          outcome: modelErrorClass(appError.code),
-          durationMs: Date.now() - callStartedAt,
-        });
-        await emit({
+        const errorStepIndex = await emit({
           kind: 'error',
           iteration,
           content: appError.message,
           isError: true,
           raw: { code: appError.code },
+        });
+        // A failed call has no `latencyMs` of its own, so the wall clock around it is
+        // the honest measurement — and for a timeout it is the interesting one.
+        //
+        // This is the line whose absence the M15 postmortem is about: a handled
+        // `MODEL_UNAVAILABLE` reaches no exception handler, so before M16 the whole
+        // incident produced no model-path log at all.
+        observeModelCall({
+          provider: provider.name,
+          model,
+          outcome: modelErrorClass(appError.code),
+          durationMs: Date.now() - callStartedAt,
+          log: logBase && {
+            ...logBase,
+            stepIndex: errorStepIndex,
+            iteration,
+            promptTokens: 0,
+            completionTokens: 0,
+            errorCode: appError.code,
+          },
         });
         return settle('failed', lastAssistantText || null, appError.code, appError.message);
       }
@@ -305,7 +353,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       totals.completionTokensTotal += response.usage.completionTokens;
       totals.modelLatencyMsTotal += response.latencyMs;
 
-      await emit({
+      const modelStepIndex = await emit({
         kind: 'model_call',
         iteration,
         content: response.message.content,
@@ -314,6 +362,31 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         completionTokens: response.usage.completionTokens,
         raw: response.providerMeta ?? null,
       });
+
+      // M14 latency SLI + M16 structured line, one call, one set of numbers.
+      observeModelCall({
+        provider: provider.name,
+        model,
+        outcome: 'success',
+        durationMs: response.latencyMs,
+        log: logBase && {
+          ...logBase,
+          stepIndex: modelStepIndex,
+          iteration,
+          promptTokens: response.usage.promptTokens,
+          completionTokens: response.usage.completionTokens,
+        },
+      });
+      if (logger) {
+        // `debug` only, and the thunk is not even called at `info`. The prompts live in
+        // `agent_runs`; this exists so that turning the level up is a real debugging
+        // tool rather than a promise docs/05 makes and nothing keeps.
+        logModelCallContent(logger, recorder.runId, modelStepIndex, () => ({
+          systemPrompt,
+          userPrompt,
+          completion: response.message.content,
+        }));
+      }
 
       const calls: ToolCall[] = response.message.toolCalls ?? [];
       if (response.message.content.trim() !== '') lastAssistantText = response.message.content;
@@ -334,17 +407,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
         totals.toolCallCount += 1;
         const parsedByProvider = call.parseOk !== false;
-        if (!parsedByProvider) {
-          totals.toolParseFailureCount += 1;
-          // M14: `tool_call_parse_failures_total{tool,recovered}`. Only provider-side
-          // failures reach this branch — arguments that parse but fail the tool's Zod
-          // schema become a `tool_result` with `is_error` below and are deliberately not
-          // counted here (docs/adr/0002 §2). `recovered` is true when the fenced-JSON
-          // fallback in `ollama.ts` reconstructed a usable call out of prose.
-          countToolParseFailure(call.name, call.recovered === true);
-        }
+        if (!parsedByProvider) totals.toolParseFailureCount += 1;
 
-        await emit({
+        const toolCallStepIndex = await emit({
           kind: 'tool_call',
           iteration,
           toolName: call.name,
@@ -354,13 +419,34 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           raw: call.recovered === true ? { recovered: true } : null,
         });
 
+        // M14: `tool_call_parse_failures_total{tool,recovered}`, incremented only for
+        // provider-side failures — arguments that parse but fail the tool's Zod schema
+        // become a `tool_result` with `is_error` below and are deliberately not counted
+        // here (docs/adr/0002 §2). `recovered` is true when the fenced-JSON fallback in
+        // `ollama.ts` reconstructed a usable call out of prose. M16: the `tool_call`
+        // line is written on every call, not only the failing ones, and carries the
+        // same `parseOk` the counter is defined by.
+        observeToolCall({
+          tool: call.name,
+          parseOk: parsedByProvider,
+          recovered: call.recovered === true,
+          log: logBase && { ...logBase, stepIndex: toolCallStepIndex, iteration },
+        });
+
         const started = Date.now();
         let result: unknown;
         let isError = false;
+        /**
+         * The `code` from the error object handed back to the model, for the
+         * `tool_result` log line. Tracked separately rather than dug back out of
+         * `result` so the field cannot drift from the JSON the model actually saw.
+         */
+        let toolErrorCode: string | null = null;
 
         const tool = byName.get(call.name);
         if (!parsedByProvider) {
           isError = true;
+          toolErrorCode = 'ARGUMENTS_NOT_JSON';
           result = toolErrorResult(
             'ARGUMENTS_NOT_JSON',
             `The arguments for "${call.name}" were not valid JSON. Send the arguments as a JSON object matching the tool's schema.`,
@@ -370,6 +456,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           // The hallucinated-tool case. Listing what *is* available is the difference
           // between a model that recovers on the next turn and one that repeats itself.
           isError = true;
+          toolErrorCode = 'UNKNOWN_TOOL';
           result = toolErrorResult('UNKNOWN_TOOL', `There is no tool named "${call.name}".`, [
             `available tools: ${[...byName.keys()].join(', ') || '(none)'}`,
           ]);
@@ -377,6 +464,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           const parsed = tool.parse(call.args);
           if (!parsed.ok) {
             isError = true;
+            // Arguments that *parsed* and then failed the schema. This is a tool error
+            // with its own code, and emphatically not `parseOk:false` (docs/adr/0002 §2).
+            toolErrorCode = 'INVALID_ARGUMENTS';
             result = toolErrorResult(
               'INVALID_ARGUMENTS',
               `The arguments for "${call.name}" do not match its schema.`,
@@ -397,6 +487,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
                   ? ((error as { code?: string }).code ?? 'TOOL_ERROR')
                   : 'TOOL_ERROR';
               const message = error instanceof Error ? error.message : String(error);
+              toolErrorCode = code;
               // A tool crashing is a bug worth a log line even though the run survives.
               if (
                 code === 'TOOL_ERROR' &&
@@ -410,11 +501,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         }
 
         const toolDurationMs = Date.now() - started;
-        // M14: `tool_execution_duration_seconds{tool,outcome}`. Measured 2–9 ms for every
-        // catalog tool, which is the point of having it next to the model histogram.
-        observeToolExecution(call.name, isError, toolDurationMs);
-
-        await emit({
+        const toolResultStepIndex = await emit({
           kind: 'tool_result',
           iteration,
           toolName: call.name,
@@ -422,6 +509,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           isError,
           latencyMs: toolDurationMs,
         });
+
+        // M14: `tool_execution_duration_seconds{tool,outcome}`. Measured 2–9 ms for every
+        // catalog tool, which is the point of having it next to the model histogram.
+        // M16: and the `tool_result` line, from the same duration.
+        observeToolExecution(
+          call.name,
+          isError,
+          toolDurationMs,
+          logBase && {
+            ...logBase,
+            stepIndex: toolResultStepIndex,
+            iteration,
+            errorCode: toolErrorCode,
+          },
+        );
 
         messages.push({
           role: 'tool',

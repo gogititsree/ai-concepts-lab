@@ -237,10 +237,295 @@ export function resetMetrics(): void {
   singleton?.registry.resetMetrics();
 }
 
+// ------------------------------------------------- structured logs (M16) ----
+//
+// Action item 6 of `docs/postmortems/2026-09-20-ollama-down-mid-run.md`. `docs/05` has
+// specified a pino line per model call since the design phase and nothing ever emitted
+// one, so across a real incident Loki and Promtail had literally nothing to aggregate:
+// the only model-path log statements were exception handlers, and a *handled*
+// `MODEL_UNAVAILABLE` never reaches one.
+//
+// ## Why the log lines live in this file
+//
+// Because the metric emit sites already hold every number the log line needs, and two
+// instrumentation paths that compute the same figure separately eventually disagree —
+// at which point the operator has to decide which of their own dashboards is lying.
+// So `observeModelCall`, `observeToolCall`, `observeToolExecution` and
+// `countRunFinished` each take an optional log context and emit **both** signals from
+// one call with one set of values. A caller cannot record the metric and forget the
+// line, or record a different latency in each.
+//
+// ## Levels
+//
+// `info` for normal lifecycle, `warn` for a **handled** failure (provider unavailable,
+// a tool that errored, arguments that were not JSON), and `error` reserved for genuine
+// bugs — which means a failed *run* is `warn`, not `error`. A run that failed because
+// Ollama was killed is an outage; logging it at `error` trains the reader to ignore the
+// level, and the M15 incident is the argument.
+//
+// ## Content never appears at `info`
+//
+// `docs/05`: "Never log prompt contents at `info` (they're in the DB); `debug` may."
+// The prompts and the completion are in `agent_runs` / `agent_run_steps`, correlated by
+// `runId`, so the log's job is the *shape* of what happened, not its text. The one
+// place text can appear is `logModelCallContent`, which is `debug` and is guarded by a
+// level check so the strings are not even built at the default level.
+//
+// ## Correlation: `reqId` and `userId` come from the logger, not from these payloads
+//
+// Every line is written through a **request-scoped** logger. Fastify binds `reqId` onto
+// it, and `auth/guards.ts` adds `userId` and `sessionId` once the session is resolved —
+// which is every route below, since they all sit behind `requireFullSession`. And
+// `agent_runs.request_id` is `String(request.id)`, the same value as `reqId`, so a Loki
+// search by request id reaches the run row and the run row reaches the trace.
+//
+// Neither field is re-added to the payloads here, and that is not an oversight: pino
+// emits a **duplicate JSON key** when a child binding and a log object carry the same
+// name, and `JSON.parse` keeps whichever came last. A line with two `userId` fields is
+// a line a log query cannot be trusted on. (Measured, not assumed — the first capture
+// of these lines during M16 had exactly that, because `userId` was being passed
+// explicitly.) The integration suite counts both fields in the raw text.
+
+/**
+ * The slice of pino these helpers use.
+ *
+ * Declared structurally rather than as `FastifyBaseLogger` so the unit suite can pass a
+ * three-line recorder, and so this file — which is imported by every instrumentation
+ * point in `model/` — does not drag Fastify's types in behind it.
+ */
+export interface TelemetryLogger {
+  info(obj: object, msg?: string): void;
+  warn(obj: object, msg?: string): void;
+  error(obj: object, msg?: string): void;
+  debug(obj: object, msg?: string): void;
+  /** pino has it; a hand-rolled test double may not, hence optional. */
+  isLevelEnabled?(level: string): boolean;
+}
+
+/**
+ * What every model-path line carries, whatever the event.
+ *
+ * No `userId` and no `reqId`: the request-scoped logger already binds both. See above.
+ */
+export interface RunLogContext {
+  logger: TelemetryLogger;
+  runId: string;
+}
+
+/** A terminal outcome is `warn` even though nothing is broken in *this* process. */
+const runLevel = (status: string): 'info' | 'warn' =>
+  status === 'completed' || status === 'cancelled' ? 'info' : 'warn';
+
+/**
+ * The three per-step line shapes, built in one place.
+ *
+ * They have two callers each — the metric emit helpers below, and
+ * `logClientReportedStep`, which covers the steps the *browser* executed and the server
+ * only stored. Two hand-written copies of a field list is how a log query starts
+ * returning half its matches.
+ */
+const modelCallLine = (
+  log: ModelCallLog,
+  provider: string,
+  model: string,
+  outcome: string,
+  latencyMs: number,
+): Record<string, unknown> => ({
+  event: 'model_call',
+  runId: log.runId,
+  stepIndex: log.stepIndex,
+  iteration: log.iteration,
+  provider,
+  model,
+  outcome,
+  latencyMs,
+  promptTokens: log.promptTokens,
+  completionTokens: log.completionTokens,
+  errorCode: log.errorCode ?? null,
+});
+
+const toolCallLine = (
+  log: ToolCallLog,
+  toolName: string,
+  parseOk: boolean,
+  recovered: boolean,
+): Record<string, unknown> => ({
+  event: 'tool_call',
+  runId: log.runId,
+  stepIndex: log.stepIndex,
+  iteration: log.iteration,
+  toolName,
+  parseOk,
+  recovered,
+});
+
+const toolResultLine = (
+  log: ToolResultLog,
+  toolName: string,
+  isError: boolean,
+  latencyMs: number,
+): Record<string, unknown> => ({
+  event: 'tool_result',
+  runId: log.runId,
+  stepIndex: log.stepIndex,
+  iteration: log.iteration,
+  toolName,
+  latencyMs,
+  isError,
+  errorCode: log.errorCode ?? null,
+});
+
+export interface ModelCallLog extends RunLogContext {
+  /**
+   * The `agent_run_steps.step_index` this call was written as — the `model_call` row on
+   * success, the `error` row on a handled failure. `null` only when the call was
+   * aborted before any row was written, because a fabricated index would be worse than
+   * an honest absence.
+   */
+  stepIndex: number | null;
+  iteration: number;
+  promptTokens: number;
+  completionTokens: number;
+  /** `null` on success. `MODEL_UNAVAILABLE`, `MODEL_TIMEOUT`, … otherwise. */
+  errorCode?: string | null;
+}
+
+export interface ToolCallLog extends RunLogContext {
+  stepIndex: number;
+  iteration: number;
+}
+
+export interface ToolResultLog extends ToolCallLog {
+  /**
+   * The `code` from the JSON error object handed back to the model
+   * (`INVALID_ARGUMENTS`, `UNKNOWN_TOOL`, `TOOL_TIMEOUT`, …). Distinct from
+   * `parseOk:false` on the `tool_call` line — see the note on `observeToolCall`.
+   */
+  errorCode?: string | null;
+}
+
+export interface RunFinishedLog extends RunLogContext {
+  provider: string;
+  model: string;
+  errorCode?: string | null;
+  toolCalls: number;
+  parseFailures: number;
+  promptTokens: number;
+  completionTokens: number;
+  /** Summed model latency for the run, not wall clock. */
+  latencyMs: number;
+}
+
+/**
+ * A step the *browser* executed and this process only stored
+ * (`POST /model/runs/:id/steps`, M11's harness).
+ *
+ * Same line shapes as the server-side loop, plus `reportedBy:"client"` so an operator
+ * can tell "the learner's own loop did this" from "the agent loop did this" — the two
+ * have very different fixes when one of them starts failing.
+ *
+ * **No metric is emitted here**, which is a deliberate non-change rather than an
+ * oversight. M14 counts client-reported tool calls in the run's rollup columns and
+ * nowhere else: `tool_execution_duration_seconds` is this process's tool execution, and
+ * a browser's millisecond timings mixed into it would make the histogram mean two
+ * different things at once. So this is the one place a line has no metric to agree
+ * with, and it says so.
+ */
+export function logClientReportedStep(
+  ctx: RunLogContext,
+  step: {
+    kind: string;
+    stepIndex: number;
+    iteration: number;
+    toolName: string | null;
+    parseOk: boolean | null;
+    isError: boolean;
+    latencyMs: number | null;
+    promptTokens: number | null;
+    completionTokens: number | null;
+  },
+  run: { provider: string; model: string },
+): void {
+  const base = { ...ctx, stepIndex: step.stepIndex, iteration: step.iteration };
+  const reportedBy = { reportedBy: 'client' as const };
+  switch (step.kind) {
+    case 'model_call':
+      ctx.logger.info(
+        {
+          ...modelCallLine(
+            {
+              ...base,
+              promptTokens: step.promptTokens ?? 0,
+              completionTokens: step.completionTokens ?? 0,
+            },
+            run.provider,
+            run.model,
+            'success',
+            step.latencyMs ?? 0,
+          ),
+          ...reportedBy,
+        },
+        'model call',
+      );
+      return;
+    case 'tool_call': {
+      // `parseOk` is whatever the client was handed by `/model/chat`, so it still means
+      // "the provider's arguments were not JSON" and nothing wider (docs/adr/0002 §2).
+      const parseOk = step.parseOk !== false;
+      const line = {
+        ...toolCallLine(base, step.toolName ?? '(unnamed)', parseOk, false),
+        ...reportedBy,
+      };
+      if (parseOk) ctx.logger.info(line, 'tool call');
+      else ctx.logger.warn(line, 'tool call arguments were not JSON');
+      return;
+    }
+    case 'tool_result': {
+      const line = {
+        ...toolResultLine(
+          { ...base, errorCode: null },
+          step.toolName ?? '(unnamed)',
+          step.isError,
+          step.latencyMs ?? 0,
+        ),
+        ...reportedBy,
+      };
+      if (step.isError) ctx.logger.warn(line, 'tool result');
+      else ctx.logger.info(line, 'tool result');
+      return;
+    }
+    default:
+      // `final` and `error` carry no numbers of their own; the `run_finished` line that
+      // follows a `final` is the one worth reading, and content never goes to `info`.
+      return;
+  }
+}
+
+/**
+ * The prompts and the completion, at `debug` and nowhere else.
+ *
+ * Takes thunks rather than strings: at the default `info` level the callback is never
+ * invoked, so a 100 KB transcript is not serialised to be thrown away. The level check
+ * is explicit for the same reason — `logger.debug(obj)` would still have built `obj`.
+ */
+export function logModelCallContent(
+  logger: TelemetryLogger,
+  runId: string,
+  stepIndex: number | null,
+  content: () => { systemPrompt?: string; userPrompt?: string; completion?: string },
+): void {
+  if (logger.isLevelEnabled && !logger.isLevelEnabled('debug')) return;
+  logger.debug(
+    { event: 'model_call_content', runId, stepIndex, ...content() },
+    'model call content',
+  );
+}
+
 // ------------------------------------------------------- emit helpers (M14) ----
 //
 // The instrumentation points in `model/` call these rather than reaching for the
 // registry, so an emit site is one line and the label vocabulary is decided here.
+// Since M16 they also emit the structured log line for the same event; see above.
 
 /** Maps an `AppError.code` onto the small, stable label set docs/05 names. */
 export function modelErrorClass(code: string): string {
@@ -264,6 +549,8 @@ export interface ModelCallObservation {
   /** `success`, or the error class from `modelErrorClass`. */
   outcome: string;
   durationMs: number;
+  /** Present → the structured line is emitted from the same numbers. */
+  log?: ModelCallLog;
 }
 
 /**
@@ -274,8 +561,17 @@ export interface ModelCallObservation {
  */
 export function observeModelCall(observation: ModelCallObservation): void {
   const metrics = getMetrics();
-  const { provider, model, outcome, durationMs } = observation;
+  const { provider, model, outcome, durationMs, log } = observation;
   metrics.modelCallDuration.observe({ provider, model, outcome }, durationMs / 1000);
+
+  if (log) {
+    const line = modelCallLine(log, provider, model, outcome, durationMs);
+    // A model call that failed is a handled failure: the run records it, the user is
+    // told, nothing crashed. `warn`, never `error`.
+    if (outcome === 'success') log.logger.info(line, 'model call');
+    else log.logger.warn(line, 'model call failed');
+  }
+
   if (outcome === 'success') {
     metrics.modelProviderUp.set({ provider }, 1);
     return;
@@ -291,11 +587,22 @@ export function setModelProviderUp(provider: string, up: boolean): void {
   getMetrics().modelProviderUp.set({ provider }, up ? 1 : 0);
 }
 
-export function observeToolExecution(tool: string, isError: boolean, durationMs: number): void {
+export function observeToolExecution(
+  tool: string,
+  isError: boolean,
+  durationMs: number,
+  log?: ToolResultLog,
+): void {
   getMetrics().toolExecutionDuration.observe(
     { tool, outcome: isError ? 'error' : 'success' },
     durationMs / 1000,
   );
+  if (!log) return;
+  const line = toolResultLine(log, tool, isError, durationMs);
+  // A tool that errored is an observation the loop feeds back to the model, not a
+  // defect in this process (docs/adr/0002 §1 even ships a tool that always throws).
+  if (isError) log.logger.warn(line, 'tool result');
+  else log.logger.info(line, 'tool result');
 }
 
 /**
@@ -310,10 +617,60 @@ export function countToolParseFailure(tool: string, recovered: boolean): void {
   getMetrics().toolCallParseFailures.inc({ tool, recovered: String(recovered) });
 }
 
-export function countRunFinished(kind: string, status: string, iterations: number): void {
+/**
+ * One `tool_call` step: the counter when it is a parse failure, the log line always.
+ *
+ * **`parseOk` on this line means exactly what `tool_call_parse_failures_total` means**
+ * and nothing wider (docs/adr/0002 §2): `parseOk:false` is "the *provider* handed back
+ * arguments that were not JSON". Arguments that parse cleanly and then fail the tool's
+ * Zod schema are a different fault with a different fix, and they surface on the
+ * `tool_result` line as `errorCode:"INVALID_ARGUMENTS"` with `isError:true` — never as
+ * `parseOk:false`. Blurring the two here would make the field as unactionable as the
+ * metric would be, and a log query for one would silently answer with the other.
+ */
+export function observeToolCall(input: {
+  tool: string;
+  parseOk: boolean;
+  recovered: boolean;
+  log?: ToolCallLog;
+}): void {
+  if (!input.parseOk) countToolParseFailure(input.tool, input.recovered);
+  const { log } = input;
+  if (!log) return;
+  const line = toolCallLine(log, input.tool, input.parseOk, input.recovered);
+  if (input.parseOk) log.logger.info(line, 'tool call');
+  else log.logger.warn(line, 'tool call arguments were not JSON');
+}
+
+export function countRunFinished(
+  kind: string,
+  status: string,
+  iterations: number,
+  log?: RunFinishedLog,
+): void {
   const metrics = getMetrics();
   metrics.agentRunsTotal.inc({ kind, status });
   if (iterations > 0) metrics.agentRunIterations.observe({ kind }, iterations);
+  if (!log) return;
+  // The rollup totals, from the same object that was just written to `agent_runs`, so
+  // the line and the row cannot disagree about what the run cost.
+  const line = {
+    event: 'run_finished',
+    runId: log.runId,
+    kind,
+    provider: log.provider,
+    model: log.model,
+    status,
+    errorCode: log.errorCode ?? null,
+    iterations,
+    toolCalls: log.toolCalls,
+    parseFailures: log.parseFailures,
+    promptTokens: log.promptTokens,
+    completionTokens: log.completionTokens,
+    latencyMs: log.latencyMs,
+  };
+  if (runLevel(status) === 'info') log.logger.info(line, 'run finished');
+  else log.logger.warn(line, 'run finished');
 }
 
 export function countStructuredRetries(retries: number, valid: boolean): void {

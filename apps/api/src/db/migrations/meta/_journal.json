@@ -15,6 +15,13 @@
       "when": 1789813226361,
       "tag": "0001_fix_progress_view_fan_out",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789932880446,
+      "tag": "0002_add_client_step_id",
+      "breakpoints": true
     }
   ]
 }

@@ -12,7 +12,16 @@
 | `apps/api/src/progress` | Quiz grading for each question kind (tolerance, multi-select exactness, text normalisation); completion rules | Business logic with edge cases |
 | `apps/web` | Reducers/stores (`usePerceptronStore`), auto-check functions for exercise tasks, `AgentTrace` renders each step kind (Testing Library) | Only what has logic; no snapshot spam |
 
-Coverage gate: 90 % lines on `nn-core` and `apps/api/src/{auth,model,progress}`; no global gate elsewhere.
+Coverage gate: 90 % lines on `nn-core` and `apps/api/src/{auth,model,progress}`.
+
+`apps/web` has a **global** gate as well, added after the 2026-09-20 postmortem exercise found
+the workspace at 83.14 % statements with nothing stopping it from drifting down: 85 % statements
+and lines, 84 % branches, 81 % functions, in `apps/web/vitest.coverage.config.ts`. Those are the
+measured figures rounded down, not a target that was met — a ratchet to raise, and the file says
+so at length. It is global rather than per-directory because reasonable coverage for a React
+component varies by an order of magnitude across `src/features`, and it excludes
+`src/workers/harnessRunner.worker.ts` by name because jsdom cannot execute a real `Worker`; the
+core that file delegates to is tested directly at 97 %.
 
 ### Integration tests (Vitest, real Postgres)
 Run against a throwaway database (Testcontainers if Docker is available; otherwise the `docker compose` Postgres with a per-run schema). Each test file gets a fresh schema via migrations + seed; `buildApp()` is called with `MODEL_PROVIDER=fake`; requests via `app.inject()` (no network).

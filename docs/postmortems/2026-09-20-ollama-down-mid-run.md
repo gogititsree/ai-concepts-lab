@@ -258,8 +258,38 @@ interaction with the dependency.*
 | 3 | **Fix `docs/runbooks/model-provider-down.md`'s Symptoms section**: `POST /model/runs` answers 202 and then fails the run; only `/model/chat` answers 503. Add "how to find the failed run" in the same breath. | mitigate | learner | 2026-09-20 | **done** |
 | 4 | **Record in the runbook that `model/health` ok ≠ inference works**, with the `CPU_REPACK` failure as the worked example, and make "run one real prompt" a required step of Verify rather than a suggestion. | mitigate | learner | 2026-09-20 | **done** |
 | 5 | **Note the memory interaction in `docs/runbooks/slow-inference.md` and the observability README**: on an 8 GB machine, `pnpm obs:up` and `gemma4:latest` compete, and the model loses. | mitigate | learner | 2026-09-20 | **done** |
-| 6 | **Emit one structured pino line per model call and per run terminal state**, with the field list `docs/05` already specifies. This is the missing third of the observability stack, and it is a small change in two known call sites (`model/agentLoop.ts`, `model/routes.ts`) where the numbers are already in hand for the metrics. | detect | learner | backlog — the largest genuine gap this exercise found | open |
+| 6 | **Emit one structured pino line per model call and per run terminal state**, with the field list `docs/05` already specifies. This is the missing third of the observability stack, and it is a small change in two known call sites (`model/agentLoop.ts`, `model/routes.ts`) where the numbers are already in hand for the metrics. | detect | learner | 2026-09-20 | **done** (M16) |
 | 7 | **Make the provider probe attempt a real (tiny) generation**, not just `/api/tags`, so `model_provider_up` means "can serve". Deliberately *not* scheduled: a probe that runs inference every 15 s on a laptop competes with the learner for the GPU, which is a worse problem than the one it solves. The honest fix is probably to probe on failure rather than on a timer. Needs thought before it needs code. | detect | learner | backlog (design first) | open |
+
+#### Item 6, as built (M16)
+
+Done, and the estimate in the row above was right about the call sites and wrong about
+one thing: the lines are emitted **from inside** the metric emit helpers
+(`observeModelCall`, `observeToolCall`, `observeToolExecution`, `countRunFinished` in
+`plugins/metrics.ts`) rather than beside them, so the line and the metric are one call
+with one set of numbers and cannot drift apart. Five events —  `model_call`,
+`tool_call`, `tool_result`, `run_finished`, and `model_call_content` at `debug` only —
+with `warn` for handled failures and `error` reserved for genuine bugs, because a run
+that failed when Ollama was killed is an outage and logging it at `error` would teach
+the reader to ignore the level.
+
+The finding that motivated the item is now a test. `test/integration/model-logging.test.ts`
+drives a run whose provider answers `MODEL_UNAVAILABLE` and asserts the line exists, at
+`warn`, with `errorCode:"MODEL_UNAVAILABLE"` and the `stepIndex` of the `error` row —
+i.e. exactly the line whose absence made this incident invisible to Loki.
+
+Two things surfaced while building it, both recorded in
+`docs/adr/0007-model-path-logging-and-step-idempotency.md`: `reqId` and `userId` must
+come from the request logger's **bindings** rather than the payload (pino writes the key
+twice otherwise, and the first capture did), and `parseOk` on the log line had to be
+held to ADR 0002's meaning so a query for malformed provider JSON does not also return
+schema rejections.
+
+Verified against the real stack before merge: four `MODEL_PROVIDER=fake` runs
+(completed, failed, `max_iterations`, malformed args) and one real `gemma4:latest` run —
+42.9 s first call, 3.4 s second, `iterations:2`, `promptTokens:419`, `latencyMs:46345`,
+matching the `agent_runs` row exactly, with `reqId:"req-3"` equal to its `request_id`
+and zero occurrences of the prompt text anywhere in the log.
 
 ### Considered and not done
 

@@ -359,6 +359,7 @@ class RealStubWorker {
     this.emit({
       type: 'step',
       step: {
+        clientStepId: 'c1',
         kind: 'tool_call',
         iteration: 1,
         toolName: 'calculator',
@@ -369,6 +370,7 @@ class RealStubWorker {
     this.emit({
       type: 'step',
       step: {
+        clientStepId: 'c2',
         kind: 'final',
         iteration: 2,
         content: 'The balance after 8 years is $4295.47.',

@@ -8,6 +8,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { apiGet, apiPost, type ApiError } from '../../../lib/apiClient';
 import { useRunStream } from '../../runs/queries';
+import {
+  isModelUnavailableError,
+  MODEL_UNAVAILABLE_CODE,
+  useRefreshModelHealth,
+} from '../prompt/useChatRun';
 
 /**
  * One agent run, from `POST /model/runs` to the completed trace.
@@ -49,6 +54,7 @@ export interface AgentRunState {
 }
 
 export function useAgentRun(): AgentRunState {
+  const refreshModelHealth = useRefreshModelHealth();
   const [status, setStatus] = useState<AgentRunStatus>('idle');
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<RunDetail | null>(null);
@@ -83,6 +89,12 @@ export function useAgentRun(): AgentRunState {
         if (cancelled || !mounted.current) return;
         setRun(detail);
         setStatus('done');
+        // `POST /model/runs` answers 202 and the provider dies *afterwards*, so unlike
+        // module 4 there is no rejected promise to read: the only place the agent path
+        // ever says MODEL_UNAVAILABLE is the terminal run row. Reading it from the
+        // persisted detail rather than from the SSE `end` summary keeps this on the same
+        // source of truth as the trace and the task checks, and costs milliseconds.
+        if (detail.errorCode === MODEL_UNAVAILABLE_CODE) refreshModelHealth();
       } catch (caught) {
         if (cancelled || !mounted.current) return;
         setError(caught instanceof Error ? caught : new Error(String(caught)));
@@ -92,27 +104,32 @@ export function useAgentRun(): AgentRunState {
     return () => {
       cancelled = true;
     };
-  }, [status, live.status, runId]);
+  }, [status, live.status, runId, refreshModelHealth]);
 
-  const start = useCallback(async (request: CreateRunRequest) => {
-    setStatus('starting');
-    setError(null);
-    setRun(null);
-    setRunId(null);
-    try {
-      const created = await apiPost('/model/runs', {
-        body: request,
-        schema: CreateRunResponseSchema,
-      });
-      if (!mounted.current) return;
-      setRunId(created.runId);
-      setStatus('running');
-    } catch (caught) {
-      if (!mounted.current) return;
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
-      setStatus('error');
-    }
-  }, []);
+  const start = useCallback(
+    async (request: CreateRunRequest) => {
+      setStatus('starting');
+      setError(null);
+      setRun(null);
+      setRunId(null);
+      try {
+        const created = await apiPost('/model/runs', {
+          body: request,
+          schema: CreateRunResponseSchema,
+        });
+        if (!mounted.current) return;
+        setRunId(created.runId);
+        setStatus('running');
+      } catch (caught) {
+        if (!mounted.current) return;
+        // `MODEL_PROVIDER=none` refuses the run outright, before there is a run row.
+        if (isModelUnavailableError(caught)) refreshModelHealth();
+        setError(caught instanceof Error ? caught : new Error(String(caught)));
+        setStatus('error');
+      }
+    },
+    [refreshModelHealth],
+  );
 
   const cancel = useCallback(async () => {
     if (!runId) return;
