@@ -441,6 +441,28 @@ describe('GET /model/runs/:id/events', () => {
     await waitForRun(liveId);
   });
 
+  /**
+   * The regression CI found and a laptop never did. The duplicate-suppression check used
+   * to live in the buffer-drain loop, so a step published through the live subscription
+   * skipped it and the client received `[0, 1, 1, 2, 3, 4]`. Timing-dependent, so this
+   * runs the race repeatedly rather than once: a single green pass proves nothing here.
+   */
+  it('never sends the same step twice, however the replay and the live stream interleave', async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const created = await createRun({
+        tools: { catalog: ['calculator'] },
+        options: { scenario: 'tool-call-once' },
+      });
+      const id = created.json().runId;
+      const steps = parseSse((await events(id)).body).frames.filter((f) => f.event === 'step');
+      const ids = steps.map((f) => f.id);
+
+      expect(ids, `attempt ${attempt} delivered a duplicate`).toEqual([...new Set(ids)]);
+      // Strictly increasing, which is what makes the id usable as a resume cursor.
+      expect(ids).toEqual([...ids].sort((a, b) => Number(a) - Number(b)));
+      await waitForRun(id);
+    }
+  });
   it('404s someone else s run rather than 403ing it', async () => {
     const res = await events(runId, {}, otherCookie);
     expect(res.statusCode).toBe(404);

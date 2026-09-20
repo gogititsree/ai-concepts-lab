@@ -624,7 +624,27 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
         reply.hijack();
         const stream = new SseStream(reply.raw);
 
+        // Highest step index actually written to this stream. Starts below zero so step 0
+        // is always eligible; `Last-Event-ID` raises it before anything is sent.
+        let highestSent = -1;
+
+        /**
+         * The one place a step reaches the client, and the only place that decides whether
+         * it already has.
+         *
+         * The guard lives here rather than at the call sites because there are three of
+         * them — replay, the buffer drain, and the live subscription — and it only takes
+         * one to skip the check. It did: the drain compared indices but the live path did
+         * not, so a step published in the window around `live = true` could be delivered
+         * twice. CI caught it as `[0, 1, 1, 2, 3, 4]`; it is a duplicate card in the
+         * learner's trace, and on a reconnect it would be more than one.
+         *
+         * Steps are strictly ordered and monotonic, so "already sent" is a comparison
+         * rather than a set, and it doubles as the resume cursor.
+         */
         const sendStep = (step: RunStep): void => {
+          if (step.stepIndex <= highestSent) return;
+          highestSent = step.stepIndex;
           stream.event('step', step, step.stepIndex);
         };
         const sendEnd = (run: RunSummary): void => {
@@ -655,21 +675,17 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
           const after = parseLastEventId(
             request.headers['last-event-id'] ?? request.query.lastEventId,
           );
+          // Resume cursor: everything up to and including `after` is already on the wire
+          // from the client's previous connection, so `sendStep` must not repeat it.
+          highestSent = after;
+
           const replayed = await loadStepsAfter(app.db, runId, after);
           for (const step of replayed) sendStep(step);
-          let highest =
-            replayed.length > 0 ? (replayed[replayed.length - 1] as RunStep).stepIndex : after;
 
           live = true;
           for (const event of buffered) {
-            if (event.type === 'step') {
-              if (event.step.stepIndex > highest) {
-                sendStep(event.step);
-                highest = event.step.stepIndex;
-              }
-            } else {
-              sendEnd(event.run);
-            }
+            if (event.type === 'step') sendStep(event.step);
+            else sendEnd(event.run);
           }
           buffered.length = 0;
 
