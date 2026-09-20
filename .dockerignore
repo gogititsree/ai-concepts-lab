@@ -11,3 +11,7 @@ spike
 playwright-report
 test-results
 *.log
+**/coverage-gate
+e2e
+playwright.config.ts
+tsconfig.e2e.json

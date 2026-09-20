@@ -31,6 +31,11 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm install --frozen-lo
 COPY tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
+# `content/` is a BUILD INPUT, not just runtime data. Module 3's tokenizer bundles
+# `corpus.txt` and the embeddings fallback bundles `embeddings-precomputed.json`, both via
+# Vite `?raw` imports, so omitting this directory fails the web build outright. It is also
+# what `pnpm db:seed` reads, so the image can seed its own database.
+COPY content ./content
 # pnpm -r builds in topological order: shared and nn-core before api and web.
 RUN pnpm -r run build
 
@@ -59,6 +64,9 @@ COPY --from=build --chown=node:node /app/packages/shared/dist ./packages/shared/
 COPY --from=build --chown=node:node /app/packages/nn-core/dist ./packages/nn-core/dist
 COPY --from=build --chown=node:node /app/apps/api/dist ./apps/api/dist
 COPY --from=build --chown=node:node /app/apps/web/dist ./apps/web/dist
+# Runtime copy as well, so `pnpm db:seed` can run inside the container (Render's shell)
+# instead of only from a laptop pointed at the production database.
+COPY --from=build --chown=node:node /app/content ./content
 
 # The `node` user ships with the official image; never run the server as root.
 USER node
