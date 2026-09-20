@@ -91,6 +91,14 @@ jobs:
       # decision is actually in force rather than pretending a run could happen. The
       # full journey is covered by the Playwright suite in `ci.yml`, against a build of
       # the same commit, before this workflow ever runs.
+      #
+      # M15 confirmed that the reasoning above holds and that the conclusion still left a
+      # gap: the deliberate bad-migration incident broke every run route, and every check
+      # in this step passed against the broken deployment. The substitute is not another
+      # HTTP call — it is `checks.schema` on `/health`
+      # (`apps/api/src/db/schemaCheck.ts`), which compares the columns drizzle declares
+      # with the columns Postgres has. No session, no model provider, no writes, and it
+      # also runs on the instance itself rather than only at deploy time.
       - name: Post-deploy smoke check
         env:
           APP_URL: ${{ vars.APP_URL }}
@@ -109,6 +117,15 @@ jobs:
           # deploy whose database is unreachable is the worst kind of green.
           echo "$body" | jq -e '.checks.db.ok == true' > /dev/null \
             || fail "the instance cannot reach its database"
+          # `checks.db` only proves the database answers SELECT 1. `checks.schema` proves
+          # the migration that just ran in the pre-deploy step produced the columns this
+          # image's queries actually name. This is the prevent/detect action item from
+          # `docs/postmortems/2026-09-20-rename-final-output.md`, and it is the assertion
+          # that would have failed the deploy that broke every run route while every
+          # other check on this page stayed green. The detail string names the missing
+          # columns, so print it rather than just saying "drift".
+          echo "$body" | jq -e '.checks.schema.ok == true' > /dev/null \
+            || fail "schema drift: $(echo "$body" | jq -r '.checks.schema.detail // "no detail"')"
 
           echo "--- /api/v1/modules (expect 401)"
           # Two facts in one request: the API router is mounted (a 404 here would mean

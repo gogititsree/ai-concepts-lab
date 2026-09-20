@@ -134,3 +134,19 @@ range to 6 h.
 
 **Loki has no lines.** The API logs to stdout; nothing writes `logs/api.log` unless you
 tee it. Check `docker logs lab-promtail` for a path error.
+
+**Loki has lines but nothing about model calls or runs.** That is correct and it is a
+known gap, not a configuration problem. As shipped, the API emits HTTP request/response
+lines and boot-time warnings and nothing else: the per-model-call structured fields
+`docs/05-quality-and-ops.md` specifies (`runId`, `stepIndex`, `latencyMs`, `toolName`,
+`parseOk`, `errorCode`…) are not implemented, and a run that fails with
+`MODEL_UNAVAILABLE` produces no log line at all. Everything about a run is in
+`agent_runs` / `agent_run_steps` and in Prometheus instead. See action item 6 in
+`docs/postmortems/2026-09-20-ollama-down-mid-run.md`.
+
+**This stack competes with the model for memory.** On an 8 GB machine, these four
+containers plus Docker's WSL VM are roughly the margin `gemma4:latest` needs to load: in
+M15 it left 482 MB free and the model failed with `unable to allocate CPU_REPACK buffer`.
+If inference starts failing shortly after `pnpm obs:up`, that is why — `pnpm obs:down`,
+kill any orphaned `llama-server`, and `wsl --shutdown` to reclaim the VM. See
+`docs/runbooks/model-provider-down.md` → Mitigate D.

@@ -21,9 +21,15 @@ Any of these, roughly in the order you will notice them:
   what the pre-deploy command is for: the migration runs before the new instance starts,
   so a failure aborts the deploy rather than replacing a working app with a broken one.
 - **The site is up, the new version is live, and requests 500** with
-  `INTERNAL` in the body and, in the logs, a Postgres error naming a column. This is the
-  bad case: the migration *succeeded* and the code does not match the schema it produced.
-  That is the expand/contract failure, below.
+  `INTERNAL_ERROR` in the body and, in the logs, a Postgres error naming a column. This is
+  the bad case: the migration *succeeded* and the code does not match the schema it
+  produced. That is the expand/contract failure, below.
+- **`/api/v1/health` reports `{"status":"down", "checks":{"db":{"ok":true},
+  "schema":{"ok":false,...}}}`.** Since M15 this is the *fast* path to the answer: the
+  `schema` check compares the columns drizzle declares with the columns Postgres has, and
+  its `detail` names the missing ones. If you see it, you are in the bad case and you
+  already know which column moved. It is also what fails the deploy — see
+  *Diagnose* step 1.
 
 ## Diagnose
 
@@ -35,11 +41,18 @@ curl -s https://<your-service>.onrender.com/api/v1/health | jq
 
 - `version` is the **old** commit → the deploy was blocked. The app is fine. You have
   time. Go to *Mitigate → the migration failed*.
+- `version` is the **new** commit and `status` is `down` with `checks.db.ok = true` →
+  the migration ran and the code disagrees with it, and `checks.schema.detail` already
+  names the columns. Go to *Mitigate → the migration succeeded and broke the app*. (This
+  is also why the deploy did not finish: `deploy.yml` waits for `ok` or `degraded`, so a
+  schema mismatch aborts the deploy and leaves the previous instance serving.)
 - `version` is the **new** commit and `status` is `ok` but routes are 500ing → the
-  migration ran and the code disagrees with it. Go to *Mitigate → the migration
-  succeeded and broke the app*.
-- `status` is `down` → the database is unreachable, which is a different problem; check
-  Neon's status page and `DATABASE_URL` before assuming it is the migration.
+  migration ran and the code disagrees with it in a way the schema check cannot see — a
+  type, a constraint, a view, an enum value. Same mitigation, more digging.
+- `status` is `down` **and `checks.db.ok` is false** → the database is unreachable, which
+  is a different problem; check Neon's status page and `DATABASE_URL` before assuming it
+  is the migration. (`checks.db` is the discriminator: `down` alone no longer means
+  "cannot reach Postgres".)
 
 **2. What did the migration actually do?** The applied-migrations table is the truth,
 not the files in the repo:
@@ -110,6 +123,22 @@ it. Rolling the code back does not roll the schema back.
    Commit it, let CI pass, deploy. The pre-deploy command applies it before the instance
    restarts.
 
+   **If you need service back before a build finishes, use a generated column.** This was
+   measured in M15: it restored every 500ing route *in the same second*, with no deploy,
+   while the real fix was written calmly.
+
+   ```sql
+   -- The running image writes `output` and reads `final_output`. Give it both.
+   ALTER TABLE agent_runs
+     ADD COLUMN final_output text GENERATED ALWAYS AS (output) STORED;
+   ```
+
+   It works for a rename because Postgres accepts `DEFAULT` for a generated column in an
+   `INSERT`, which is exactly what drizzle emits for a column it is not setting — so reads
+   *and* writes recover. Retire it in the real fix (drop the generated column, then
+   rename back), because a generated column is one-way: writes still have to go to
+   `output`.
+
 3. **Restore** (only if rows are gone): Neon keeps point-in-time history on the free
    plan. Neon console → the project → Branches → **Create branch from a timestamp**, a
    minute before the migration. That gives you a *new* branch with its own connection
@@ -120,8 +149,8 @@ it. Rolling the code back does not roll the schema back.
 ## Verify
 
 ```bash
-# 1. Health reports the commit you intended to ship.
-curl -s "$APP_URL/api/v1/health" | jq '{status, version, db: .checks.db.ok}'
+# 1. Health reports the commit you intended to ship — and that the schema matches it.
+curl -s "$APP_URL/api/v1/health" | jq '{status, version, db: .checks.db.ok, schema: .checks.schema}'
 
 # 2. The route that was 500ing is not.
 curl -s -o /dev/null -w '%{http_code}\n' "$APP_URL/api/v1/modules"   # expect 401
@@ -130,14 +159,17 @@ curl -s -o /dev/null -w '%{http_code}\n' "$APP_URL/api/v1/modules"   # expect 40
 psql "$DATABASE_URL" -c '\d agent_runs'
 ```
 
-Then open the site, log in and load a module. `/health` being green proves the process
-started; it proves nothing about the queries.
+Then open the site, log in and **load a run page** — `/runs`, then a run. `/health` being
+green proves the process started and, since M15, that the columns exist; it still proves
+nothing about the queries themselves.
 
 ## Follow-ups
 
-- **Write the postmortem.** M15 in `docs/06-roadmap.md` exists to practise exactly this.
-  Blameless: the interesting question is never "who wrote the migration", it is "what
-  made the bad version look fine in review".
+- **Write the postmortem**, from `docs/postmortems/TEMPLATE.md`. Blameless: the
+  interesting question is never "who wrote the migration", it is "what made the bad
+  version look fine in review". There is a worked example next to the template —
+  `docs/postmortems/2026-09-20-rename-final-output.md`, the M15 exercise — including the
+  full list of monitors that stayed silent and why.
 - **Add the missing test.** A migration failure that CI's `integration` job did not catch
   means the job's Postgres and production's schema had diverged, usually because a
   migration was applied to a long-lived local database and never to a clean one. CI
@@ -201,5 +233,19 @@ column and renames its uses, and it is internally consistent. What review cannot
 that the two halves land at *different times*: the pre-deploy migration runs while the
 old instance is still serving traffic.
 
-M15 ships that mistake deliberately, on purpose, to see it happen. This runbook is what
-you will be reading when it does.
+M15 shipped that mistake deliberately, on purpose, to see it happen. This runbook is what
+was being read when it did — see
+[`docs/postmortems/2026-09-20-rename-final-output.md`](../postmortems/2026-09-20-rename-final-output.md)
+for the real timeline, the real error text and what the monitoring did and did not notice.
+
+Two things that postmortem changed here:
+
+- **The schema check now exists** (`apps/api/src/db/schemaCheck.ts`). It is the reason
+  `/health` can report `down` for a schema mismatch, and it is the only monitor that
+  noticed the incident at all. Note what it deliberately does *not* flag: a column the
+  database has and the code does not. That is the expand phase above, and a check that
+  called it drift would forbid the discipline this whole section is arguing for.
+- **A guard that never runs provides no assurance.** The integration suite catches this
+  mistake in 49 seconds and did not, because this repository has no remote and `ci.yml`
+  has never executed (`docs/adr/0004` § 5 and its addendum). If you are reading this
+  because it happened to you, check *that* first.

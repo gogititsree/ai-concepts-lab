@@ -100,6 +100,15 @@ ollama stop <other-model>
 An 8B model at Q4_K_M plus anything else is where a laptop starts swapping, and a swapping
 model is 5–10× slower rather than 20 % slower.
 
+**"Anything else" includes the observability stack**, and this is not theoretical. During
+M15 (`docs/postmortems/2026-09-20-ollama-down-mid-run.md`), `pnpm obs:up` — Prometheus,
+Grafana, Loki and Promtail, plus Docker's WSL VM — left 482 MB free on an 8 GB machine,
+and `gemma4:latest` then failed to load outright with `unable to allocate CPU_REPACK
+buffer` for 1.94 GB. The tooling brought in to watch the slowness *caused* it, and
+because the failure was a load failure rather than a slow load, `model_provider_up`
+stayed at 1 the whole time. If the numbers went bad around the time you started watching
+them, `pnpm obs:down` and measure again before changing anything else.
+
 **C — the prompt grew.** This is the one to check first when the slowdown arrived with a
 change rather than gradually. In the Module 5 exercise, untick every tool the question does
 not need: the measured cost of the full catalog was 4.6× the prompt and 3× the latency for
