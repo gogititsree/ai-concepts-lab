@@ -71,22 +71,62 @@ checks to pass", search for the four job names, and tick "Do not allow force pus
 1. New → Web Service → connect the GitHub repository.
 2. Runtime **Docker**, Dockerfile path `docker/Dockerfile`, plan **Free**.
 3. **Pre-deploy command**: `node apps/api/dist/db/migrate.js`. This is the step that keeps
-   migrations out of server start, so two instances can never race them.
-4. Environment variables:
+   migrations out of server start, so two instances can never race them, and a failed
+   migration aborts the deploy with the previous version still serving.
 
-| Key | Value |
-|---|---|
-| `DATABASE_URL` | the Neon pooled string |
-| `SESSION_SECRET` | `openssl rand -base64 48` |
-| `MFA_ENCRYPTION_KEY` | `openssl rand -base64 32` (exactly 32 bytes decoded) |
-| `APP_ORIGIN` | `https://<your-service>.onrender.com` |
-| `MODEL_PROVIDER` | `none` (decision 1: the free tier has no GPU) |
-| `COOKIE_SECURE` | `true` |
-| `TRUST_PROXY` | `true` |
-| `NODE_ENV` | `production` |
+   **Caveat, and check this before you rely on it:** Render restricts pre-deploy commands
+   to paid instance types. If the Free plan will not accept the field (it is also set in
+   `render.yaml`, which the blueprint applies), run migrations by hand immediately before
+   triggering a deploy:
+
+   ```bash
+   DATABASE_URL='<neon pooled url>' pnpm db:migrate
+   ```
+
+   Do *not* work around it by moving migrations into the server's start-up path. The
+   whole reason they are a separate step is that start-up runs on every restart, and a
+   restart loop would then be a migration loop. `docs/runbooks/db-migration-failed.md`
+   covers what to do when one fails either way.
+4. Environment variables. This table and the `envVars:` block in `render.yaml` are the
+   same list; if they ever disagree, one of them is a bug:
+
+| Key | Value | Secret? |
+|---|---|---|
+| `NODE_ENV` | `production` | no |
+| `PORT` | `3000` | no |
+| `DATABASE_URL` | the Neon **pooled** string | yes |
+| `DB_POOL_MAX` | `3` | no |
+| `SESSION_SECRET` | `openssl rand -base64 48` | yes |
+| `APP_ORIGIN` | `https://<your-service>.onrender.com` | no |
+| `COOKIE_SECURE` | `true` | no |
+| `TRUST_PROXY` | `true` | no |
+| `MFA_ENCRYPTION_KEY` | `openssl rand -base64 32` (exactly 32 bytes decoded) | yes |
+| `MAINTENANCE_TOKEN` | `openssl rand -base64 36` | yes |
+| `METRICS_TOKEN` | `openssl rand -base64 24` | yes |
+| `MODEL_PROVIDER` | `none` (decision 1: the free tier has no GPU) | no |
+
+Four of these are required in production and the app **refuses to boot** without them,
+with the offending variable named in the error: `DATABASE_URL`, `SESSION_SECRET`,
+`MFA_ENCRYPTION_KEY` and `APP_ORIGIN`. That is deliberate — each one has a default that
+would otherwise "work" and be wrong (a localhost database, a committed dev secret, an
+origin pointing at the Vite dev server). The first line in the log of every deploy is the
+effective configuration with the secrets redacted, so you can see what the instance
+actually resolved.
+
+`MAINTENANCE_TOKEN` and `METRICS_TOKEN` are the exceptions: the app boots without them
+and `POST /api/v1/ops/maintenance` / `GET /metrics` answer 503. Both fail **closed** — an
+unset token means the endpoint is off, never that it is open — and neither is worth
+refusing to start over. Housekeeping is retention, not correctness, and a missing
+scrape token should not be able to take the site down.
+
+**Do not set `GIT_SHA`.** Render injects `RENDER_GIT_COMMIT` on every deploy and the app
+falls back to it; a value pinned in the dashboard would go stale on the next deploy, and
+`deploy.yml` — which polls `/api/v1/health` until `version` equals the commit it shipped
+— would then either hang for five minutes or pass against the old code.
 
 `MFA_ENCRYPTION_KEY` is the one to be careful with. Change it and every enrolled
 authenticator stops working, because the stored TOTP secrets can no longer be decrypted.
+There is a correct way to rotate it; it is in `docs/runbooks/secrets-rotation.md`.
 
 5. Settings → Deploy Hook → copy the URL.
 
@@ -95,10 +135,23 @@ authenticator stops working, because the stored TOTP secrets can no longer be de
 ```bash
 gh secret set RENDER_DEPLOY_HOOK_URL --body 'https://api.render.com/deploy/srv-...'
 gh variable set APP_URL --body 'https://<your-service>.onrender.com'
+# The same value you put in Render's MAINTENANCE_TOKEN, character for character.
+gh secret set MAINTENANCE_TOKEN --body '<the token from the table above>'
 ```
 
 `deploy.yml` then runs after a green CI on `main`, pokes the hook, and polls
-`/api/v1/health` until the reported `version` matches the commit.
+`/api/v1/health` until the reported `version` matches the commit (five minutes, which is
+the cold-start budget). It then runs a post-deploy smoke check that goes past `/health`:
+`/api/v1/modules` must answer **401** (the router is mounted and the session guard is
+on), `/api/v1/model/health` must report provider `none` (decision 1 is in force), `/`
+must return the SPA shell *and* the JS bundle it references, and the response must carry
+a CSP, HSTS and `nosniff`.
+
+`maintenance.yml` uses `MAINTENANCE_TOKEN` and `APP_URL`. It runs daily at 03:17 UTC and
+can be triggered by hand from the Actions tab; it deletes expired sessions and abandoned
+MFA enrollments, deletes agent runs older than 90 days, and clears the bulky `raw`
+payload from run steps older than 14 days. See `docs/runbooks/session-cleanup.md` and
+`docs/runbooks/run-retention.md`.
 
 ### After the first deploy
 

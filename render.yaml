@@ -1,6 +1,12 @@
 # Render blueprint for the single-container deployment. The service itself has to be
 # created in the Render dashboard (or via "New > Blueprint" pointed at this file); this
 # file is the reviewable record of its configuration.
+#
+# The environment variables here must stay in step with the table in
+# `docs/github-setup.md`, which is what the owner actually types into the dashboard.
+# Every key below appears in that table and vice versa; if they ever disagree, the
+# symptom is an instance that refuses to boot (`config.ts` fails fast) or, worse, one
+# that boots with a wrong-but-usable default.
 services:
   - type: web
     name: ai-concepts-lab
@@ -14,20 +20,43 @@ services:
     # Deploys are driven by .github/workflows/deploy.yml (deploy hook) after CI passes,
     # not by Render watching the branch.
     autoDeploy: false
+    # Migrations run once per deploy, *before* the new instance starts serving, and not
+    # from the server's own start-up path — so two instances (or a restart loop) can
+    # never race each other applying the same migration. A failed pre-deploy aborts the
+    # deploy and leaves the previous version serving, which is the behaviour you want:
+    # see docs/runbooks/db-migration-failed.md for what to do next, and in particular
+    # for why "just redeploy the old image" is not a rollback once the schema has moved.
+    #
+    # NOTE: Render restricts pre-deploy commands to paid instance types. On `plan: free`
+    # this key may be ignored or rejected; docs/github-setup.md documents the manual
+    # fallback (`pnpm db:migrate` against the Neon URL before poking the deploy hook).
+    preDeployCommand: node apps/api/dist/db/migrate.js
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 3000
-      # Set per deploy so GET /api/v1/health reports which commit is live; deploy.yml
-      # polls that value. Not synced from this file, hence sync: false.
-      - key: GIT_SHA
-        sync: false
-      # Required since M4: the API refuses to boot without it. Set in the dashboard to the
-      # Neon connection string (sync: false keeps the secret out of the repo). Running the
-      # migrations as a Render pre-deploy command is M13's job.
+      # GIT_SHA is deliberately absent. Render builds the image itself, so there is no
+      # `--build-arg GIT_SHA=...` to bake in, and a value pinned here or in the
+      # dashboard would go stale on the very next deploy — at which point
+      # `GET /api/v1/health` would report a commit that is not running and deploy.yml's
+      # poll would either hang for five minutes or, worse, pass against the old code.
+      # Instead Render injects RENDER_GIT_COMMIT at runtime and `config.ts` falls back
+      # to it (M1 deviation 2). Nothing to configure; that is the point.
+      #
+      # --- Database (M4 / M13) ---
+      # The Neon **pooled** connection string (the host with `-pooler` in it). Pooled
+      # matters: the app, the pre-deploy migration and any shell session all draw on one
+      # free-tier connection allowance. `db/client.ts` also detects the `-pooler` host
+      # and turns off named prepared statements, which transaction-mode pooling cannot
+      # be relied on to support.
       - key: DATABASE_URL
         sync: false
+      # Three connections, not the driver's default and not the old five. Set
+      # explicitly here rather than left to the code default so the deployed value is
+      # visible in review; the reasoning is in `config.ts`.
+      - key: DB_POOL_MAX
+        value: 3
       # --- Auth (M5) ---
       # HMAC key for signing the `sid` cookie. A secret, so it is set in the dashboard
       # (sync: false) and never committed. Rotating it logs everyone out, which is the
@@ -36,8 +65,9 @@ services:
       - key: SESSION_SECRET
         sync: false
       # The public URL of this service (the API serves the SPA from its own origin in
-      # production). Not a secret, but it differs per Render service name, so it is set in
-      # the dashboard rather than hard-coded here and silently wrong on a rename.
+      # production). Not a secret, but it differs per Render service name, so it is set
+      # in the dashboard rather than hard-coded here and silently wrong on a rename.
+      # Required in production since M13: there is no usable default.
       - key: APP_ORIGIN
         sync: false
       # Render terminates TLS, so the cookie must be Secure...
@@ -52,7 +82,20 @@ services:
       # and a different one from SESSION_SECRET on purpose: rotating the cookie key logs
       # everyone out, rotating this one makes every enrolled authenticator unreadable.
       # Generate with `openssl rand -hex 32` (or `pnpm setup:env` locally).
+      # Rotation is not a dashboard edit — see docs/runbooks/secrets-rotation.md.
       - key: MFA_ENCRYPTION_KEY
+        sync: false
+      # --- Maintenance (M13) ---
+      # Bearer token for POST /api/v1/ops/maintenance, called daily by
+      # .github/workflows/maintenance.yml. The same value goes in the GitHub Actions
+      # secret MAINTENANCE_TOKEN. If it is unset the endpoint answers 503 and the app is
+      # otherwise unaffected (decision 13; see docs/adr/0005-production-hardening.md).
+      - key: MAINTENANCE_TOKEN
+        sync: false
+      # --- Observability (M14) ---
+      # Bearer token for GET /metrics. Optional, and the endpoint fails closed (503)
+      # without it, so an unset value means "no scraping", never "metrics are public".
+      - key: METRICS_TOKEN
         sync: false
       # --- Model provider (M9) ---
       # Decision 1 in docs/07-open-decisions.md: the free tier has no GPU and no Ollama,

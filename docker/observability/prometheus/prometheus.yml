@@ -1,0 +1,36 @@
+# Prometheus for the local learning stack (M14).
+#
+# Scrapes the API running **on the host** (`pnpm dev`), not in a container: the whole
+# point of this profile is to watch the app you are actually editing.
+# `host.docker.internal` is how a container reaches the host on Docker Desktop; the
+# compose file adds `extra_hosts` so the same name works on Linux.
+#
+# 15 s interval, 10 s timeout: the timeout has to be generous because `/metrics` refreshes
+# `model_provider_up` by probing the provider, and a probe against a machine that is
+# powered off (rather than refusing the connection) takes a couple of seconds.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    env: local
+
+scrape_configs:
+  - job_name: api
+    metrics_path: /metrics
+    # The bearer token the API requires (`METRICS_TOKEN`). Prometheus does not expand
+    # environment variables inside its config, so the token arrives as a **compose
+    # secret sourced from the environment** (see docker-compose.yml) and is read from
+    # the file compose mounts. That keeps the token out of this file, out of the image
+    # and out of `docker inspect`'s environment listing.
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+    static_configs:
+      - targets: ['host.docker.internal:3000']
+        labels:
+          service: ai-concepts-lab
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

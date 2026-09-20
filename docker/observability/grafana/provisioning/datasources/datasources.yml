@@ -1,0 +1,35 @@
+# Provisioned datasources (M14). Nothing here is clicked into existence: a dashboard that
+# only works after someone remembers which URL they typed into a form is not reproducible,
+# and the point of this profile is that `docker compose --profile observability up` gives
+# the same stack every time.
+#
+# The UIDs are fixed and referenced by `dashboards/agent.json` and by the alert rules.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: lab-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Matches prometheus.yml's scrape_interval, so Grafana's `$__rate_interval`
+      # resolves to something that actually has samples in it.
+      timeInterval: 15s
+      httpMethod: POST
+
+  - name: Loki
+    uid: lab-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      # Click a `reqId` in a log line and land on the run it belongs to. The API puts
+      # `reqId` on every line and `x-request-id` on every response, which is what makes
+      # the jump from a log to a trace one hop.
+      derivedFields:
+        - name: reqId
+          matcherRegex: '"reqId":"([^"]+)"'
+          url: 'http://localhost:5173/runs?requestId=$${__value.raw}'

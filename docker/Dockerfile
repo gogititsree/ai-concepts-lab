@@ -49,7 +49,15 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 
 # ------------------------------------------------------------------------- runtime ----
 FROM ${NODE_IMAGE} AS runtime
-ARG GIT_SHA=dev
+# Empty by default, and that is load-bearing. CI builds with
+# `--build-arg GIT_SHA=${{ github.sha }}` and bakes the commit in. **Render builds the
+# image itself and passes no build arg** — so a non-empty default here (it used to be
+# `dev`) would win over Render's own RENDER_GIT_COMMIT, `GET /api/v1/health` would report
+# `version: "dev"` forever, and deploy.yml's poll could never match the commit it just
+# shipped. With an empty value, `loadConfig` treats it as unset and falls back to
+# RENDER_GIT_COMMIT (see apps/api/src/config.ts), and a plain `docker run` reports the
+# schema default `dev`.
+ARG GIT_SHA=""
 ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \

@@ -1,0 +1,18 @@
+# Loads every dashboard JSON in /var/lib/grafana/dashboards at startup.
+#
+# `allowUiUpdates: true` so a panel can be edited live while learning, but the file on
+# disk stays the source of truth: a restart puts it back. If an edit is worth keeping,
+# export the JSON over `dashboards/agent.json` and commit it.
+apiVersion: 1
+
+providers:
+  - name: ai-concepts-lab
+    orgId: 1
+    folder: 'AI Concepts Lab'
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

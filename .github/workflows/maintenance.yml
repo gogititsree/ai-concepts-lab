@@ -1,0 +1,93 @@
+name: Maintenance
+
+# Housekeeping for the deployed instance (M13, decision 13 in docs/07-open-decisions.md).
+#
+# Locally the same work runs on an hourly `setInterval` inside the API process. That does
+# not survive contact with the free tier: a Render free service sleeps after ~15 minutes
+# of inactivity, and a sleeping process runs no timers — so the retention job would only
+# ever run while somebody was using the app, and never during the long quiet stretches
+# when the rows actually accumulate. A scheduled workflow is free, versioned with the
+# code, and leaves a visible run history to point at when asked "when did this last run?".
+
+on:
+  schedule:
+    # 03:17 UTC daily. Not on the hour: GitHub's scheduler queues cron jobs, and the top
+    # of the hour is the most contended slot there is, so an on-the-hour schedule is the
+    # one most likely to be delayed or dropped.
+    - cron: '17 3 * * *'
+  # So the runbooks can say "re-run it now" and mean a button.
+  workflow_dispatch:
+
+concurrency:
+  # Two sweeps at once would race each other's DELETEs for no benefit, and on a three
+  # connection pool they would also crowd out real traffic.
+  group: maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Session and run retention sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the maintenance endpoint
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          MAINTENANCE_TOKEN: ${{ secrets.MAINTENANCE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APP_URL:-}" ]; then
+            echo "::error::APP_URL repository variable is not set (see docs/github-setup.md)"
+            exit 1
+          fi
+          if [ -z "${MAINTENANCE_TOKEN:-}" ]; then
+            echo "::error::MAINTENANCE_TOKEN secret is not set (see docs/github-setup.md)"
+            exit 1
+          fi
+
+          # --max-time 180: this request is very likely the one that wakes a sleeping
+          # free instance, and a cold start is 30-60 s before the process even exists.
+          # --retry 3 with --retry-connrefused covers the window where Render has
+          # started routing but the container has not bound its port yet.
+          #
+          # X-Requested-With is the CSRF header every non-GET under /api must carry
+          # (apps/api/src/plugins/csrf.ts). It is not what protects this route — a header
+          # stops cross-site *browser* requests, and curl is not a browser. The bearer
+          # token is the security; this header is just the API's calling convention.
+          http_code=$(curl \
+            --silent --show-error \
+            --max-time 180 --retry 3 --retry-delay 20 --retry-connrefused \
+            --request POST "$APP_URL/api/v1/ops/maintenance" \
+            --header "Authorization: Bearer $MAINTENANCE_TOKEN" \
+            --header 'X-Requested-With: fetch' \
+            --output response.json \
+            --write-out '%{http_code}')
+
+          echo "HTTP $http_code"
+          # The body is counts, never secrets, so printing it makes the run log the
+          # audit trail: "how many rows did the sweep remove on the 3rd?" is answerable
+          # without database access.
+          cat response.json || true
+          echo
+
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Maintenance sweep failed with HTTP $http_code"
+            # 401 means the token in this repository and the token on the instance have
+            # drifted; 503 means the instance has no MAINTENANCE_TOKEN at all.
+            # docs/runbooks/session-cleanup.md walks through both.
+            exit 1
+          fi
+
+          # Surfaced on the run's summary page, so the history is readable at a glance
+          # rather than by opening each log.
+          {
+            echo '### Maintenance sweep'
+            echo
+            echo '```json'
+            cat response.json
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

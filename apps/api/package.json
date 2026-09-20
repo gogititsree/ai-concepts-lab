@@ -23,6 +23,7 @@
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
     "@fastify/cors": "^11.1.0",
+    "@fastify/helmet": "^13.1.1",
     "@fastify/rate-limit": "^11.2.0",
     "@fastify/static": "^8.2.0",
     "@lab/shared": "workspace:*",
@@ -32,6 +33,7 @@
     "fastify-type-provider-zod": "^4.0.2",
     "otplib": "^13.5.0",
     "postgres": "^3.4.9",
+    "prom-client": "^15.1.3",
     "qrcode": "^1.5.4",
     "zod": "^3.25.76"
   },

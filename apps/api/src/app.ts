@@ -18,9 +18,14 @@ import { healthRoutes, type HealthRoutesOptions } from './routes/health.js';
 import { embedRoute } from './model/embedRoute.js';
 import { modelRoutes } from './model/routes.js';
 import { progressRoutes } from './progress/routes.js';
+import { maintenanceRoutes } from './ops/maintenance.js';
+import { opsRoutes } from './ops/routes.js';
 import { registerCsrfGuard } from './plugins/csrf.js';
 import { registerErrorHandler } from './plugins/error-handler.js';
+import { registerMetrics } from './plugins/metrics.js';
 import { registerRateLimits } from './plugins/rate-limit.js';
+import { registerSecurityHeaders } from './plugins/security.js';
+import { logEffectiveConfig } from './plugins/startup-log.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -113,10 +118,20 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   //   csrf        — cheap header check; rejects forged cross-site writes next.
   //   error       — the handler that renders whatever the above threw.
   //   routes      — last, so every hook above already applies to them.
+  //
+  // M13 adds `security` at the top: helmet's response headers must be on *every*
+  // response, including the ones the rate limiter and the CSRF guard reject, because a
+  // 429 rendered in a frame is still a clickjacking target.
+  await registerSecurityHeaders(app, { config: cfg });
   await app.register(cookie, { secret: cfg.SESSION_SECRET });
   await registerRateLimits(app, { enabled: opts.rateLimits ?? true });
   registerCsrfGuard(app);
   registerErrorHandler(app);
+
+  // M13: what this instance thinks it is, secrets redacted. Emitted here rather than in
+  // `server.ts` so it is the first thing in the log for every entrypoint that builds an
+  // app, including the migration and seed containers.
+  logEffectiveConfig(app, cfg);
 
   // Request-scoped auth state, null until a guard fills it in. Declaring the properties
   // up front keeps the request object a single hidden class instead of a new shape per
@@ -162,6 +177,23 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   // M8: POST /model/embed, for Module 3's embeddings tab. Its own plugin (and its own
   // guard) until M9 folds it into the provider seam; see `model/embedRoute.ts`.
   await app.register(embedRoute, { prefix: '/api/v1' });
+
+  // M13: POST /ops/maintenance. Outside the session-guarded scope on purpose — the
+  // caller is a scheduled workflow holding a bearer token, not a browser holding a
+  // cookie. The route does its own authorisation; see `ops/maintenance.ts`.
+  await app.register(maintenanceRoutes, { prefix: '/api/v1' });
+
+  // M14: `GET /ops/sli`, the in-app SLI feed. Its own `preHandler` rather than the
+  // guarded scope above, for the same reason as the model routes — it is registered
+  // after them and sits at the top level so `/metrics` can be a sibling.
+  await app.register(opsRoutes, { prefix: '/api/v1' });
+
+  // M14: `GET /metrics` (bearer `METRICS_TOKEN`) plus the `onResponse` hook behind
+  // `http_request_duration_seconds`. Registered last so the hook is applied to every
+  // route above — Fastify hooks added at the root apply to the whole instance regardless
+  // of order, but keeping it here makes the "everything else is already registered"
+  // reading obvious.
+  await registerMetrics(app);
 
   const webDistPath = opts.webDistPath ?? defaultWebDistPath;
   const serveSpa = cfg.NODE_ENV === 'production' && existsSync(webDistPath);

@@ -76,3 +76,7 @@ export * from './progress.js';
 // M9 model contracts (provider-neutral chat types, /model/chat, /model/health,
 // /model/runs). Same wholesale-export reasoning as progress.ts.
 export * from './model.js';
+
+// M14 SRE contracts (`GET /ops/sli`). Wholesale export for the same reason as
+// progress.ts and model.ts: every name in the file is part of the wire contract.
+export * from './ops.js';

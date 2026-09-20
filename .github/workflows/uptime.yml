@@ -1,0 +1,207 @@
+name: Uptime
+
+# The scheduled check from `docs/05-quality-and-ops.md` → Alerting. Free, versioned, and
+# it leaves the paper trail a postmortem needs: an issue with a timestamp, which is the
+# thing UptimeRobot's email does not give you.
+#
+# It is deliberately the *second* line of defence. UptimeRobot hits `/health` every five
+# minutes and emails; this runs every thirty and files. Thirty minutes is not a resolution
+# choice, it is a cost one — see `docs/slo.md` → "What is not measured".
+on:
+  schedule:
+    # Every 30 minutes. GitHub's scheduler is best-effort and can be minutes late or skip
+    # a run entirely under load; that is acceptable for a paper trail and is another
+    # reason this is not the only monitor.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'Override APP_URL (point it at a dead host to test the issue path)'
+        required: false
+        type: string
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Only what `gh issue create` and the duplicate search need.
+  issues: write
+
+jobs:
+  check:
+    name: Health and SLI check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the target
+        id: target
+        env:
+          INPUT_URL: ${{ inputs.app_url }}
+          VAR_URL: ${{ vars.APP_URL }}
+        run: |
+          url="${INPUT_URL:-$VAR_URL}"
+          if [ -z "$url" ]; then
+            echo "::error::APP_URL repository variable is not set and no override was given"
+            exit 1
+          fi
+          echo "url=${url%/}" >> "$GITHUB_OUTPUT"
+
+      - name: Check /health
+        id: health
+        env:
+          APP_URL: ${{ steps.target.outputs.url }}
+        run: |
+          set -u
+          # --max-time 60 and one retry, both on purpose (docs/slo.md § 1): a Render free
+          # instance sleeps after fifteen minutes of inactivity and the first request
+          # after that waits for a container to start. That is latency, not downtime, and
+          # a 10-second timeout would file an incident every night.
+          probe() {
+            curl --silent --show-error --max-time 60 \
+                 --write-out '\n%{http_code}' "$APP_URL/api/v1/health" 2>/dev/null || true
+          }
+
+          raw="$(probe)"
+          code="$(printf '%s' "$raw" | tail -n1)"
+          body="$(printf '%s' "$raw" | sed '$d')"
+          if [ "$code" != "200" ]; then
+            echo "First attempt failed (http=${code:-none}); retrying in 20 s in case it was a cold start."
+            sleep 20
+            raw="$(probe)"
+            code="$(printf '%s' "$raw" | tail -n1)"
+            body="$(printf '%s' "$raw" | sed '$d')"
+          fi
+
+          status="$(printf '%s' "$body" | jq -r '.status // "unreachable"' 2>/dev/null || echo unreachable)"
+          version="$(printf '%s' "$body" | jq -r '.version // "unknown"' 2>/dev/null || echo unknown)"
+          echo "http=${code:-none} status=$status version=$version"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "http=${code:-none}" >> "$GITHUB_OUTPUT"
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$body" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          # `degraded` is HTTP 200 and is NOT a failure. The deployed instance runs
+          # MODEL_PROVIDER=none on purpose (decision 1 in docs/07-open-decisions.md), so a
+          # missing model must never page. Only `down` — the database is unreachable — or
+          # no answer at all counts.
+          if [ "$code" = "200" ] && { [ "$status" = "ok" ] || [ "$status" = "degraded" ]; }; then
+            echo "down=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "down=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the run success rate
+        id: sli
+        # Skipped when the service is already down: the SLI call would fail for the same
+        # reason and would only add noise to an incident that is already filed.
+        if: steps.health.outputs.down == 'false'
+        env:
+          APP_URL: ${{ steps.target.outputs.url }}
+          # `/ops/sli` requires a session *or* this read-only bearer token — see
+          # `apps/api/src/ops/routes.ts` for why reusing METRICS_TOKEN was the smallest
+          # honest option (a workflow has no cookie, and MAINTENANCE_TOKEN can delete
+          # rows). If the secret is not set, this half of the check is skipped loudly
+          # rather than silently reporting healthy.
+          METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
+        run: |
+          set -u
+          if [ -z "${METRICS_TOKEN:-}" ]; then
+            echo "::warning::METRICS_TOKEN secret is not set; the run-success-rate half of this check is not running. Set it (same value as the deployed service) to enable it."
+            echo "breach=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          body="$(curl --silent --show-error --max-time 60 \
+                   -H "Authorization: Bearer $METRICS_TOKEN" \
+                   "$APP_URL/api/v1/ops/sli?hours=24" || true)"
+          rate="$(printf '%s' "$body" | jq -r '.runs.successRate // empty' 2>/dev/null || true)"
+          terminal="$(printf '%s' "$body" | jq -r '.runs.terminal // 0' 2>/dev/null || echo 0)"
+          echo "successRate=${rate:-null} terminal=$terminal"
+          echo "rate=${rate:-null}" >> "$GITHUB_OUTPUT"
+          echo "terminal=$terminal" >> "$GITHUB_OUTPUT"
+
+          # docs/05: below 80 % with at least ten runs. The floor matters more than the
+          # threshold — at a solo learner's volume, "1 of 2 runs failed" is 50 % and means
+          # nothing, and an alert that fires on two data points is an alert you learn to
+          # close without reading.
+          breach=false
+          if [ -n "${rate:-}" ] && [ "$terminal" -ge 10 ]; then
+            if awk -v r="$rate" 'BEGIN { exit !(r < 0.8) }'; then breach=true; fi
+          fi
+          echo "breach=$breach" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the incident issue
+        if: steps.health.outputs.down == 'true' || steps.sli.outputs.breach == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_URL: ${{ steps.target.outputs.url }}
+          HEALTH_STATUS: ${{ steps.health.outputs.status }}
+          HEALTH_HTTP: ${{ steps.health.outputs.http }}
+          HEALTH_BODY: ${{ steps.health.outputs.body }}
+          SLI_RATE: ${{ steps.sli.outputs.rate }}
+          SLI_TERMINAL: ${{ steps.sli.outputs.terminal }}
+          DOWN: ${{ steps.health.outputs.down }}
+        run: |
+          set -euo pipefail
+
+          if [ "$DOWN" = "true" ]; then
+            title="[incident] Service is down"
+            detail="/api/v1/health answered http=${HEALTH_HTTP} status=${HEALTH_STATUS} on two attempts 20 s apart."
+            runbook="Start with docs/runbooks/db-migration-failed.md if a deploy just went out, otherwise check Render and Neon."
+          else
+            title="[incident] Agent run success rate below 80 %"
+            detail="/api/v1/ops/sli?hours=24 reports successRate=${SLI_RATE} over ${SLI_TERMINAL} finished runs."
+            runbook="Read the errorCodes field first. MODEL_UNAVAILABLE -> docs/runbooks/model-provider-down.md; MAX_ITERATIONS -> docs/runbooks/runaway-loops.md; MODEL_TIMEOUT -> docs/runbooks/slow-inference.md."
+          fi
+
+          # **Deduplicated by title.** A sustained outage triggers this workflow 48 times
+          # a day; 48 identical issues would bury the one that matters and make the
+          # incident timeline unreadable. One issue per condition, commented on while it
+          # persists, closed by a human when it is fixed — which also means the issue's
+          # created_at is the incident start time a postmortem needs.
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label incident \
+                        --search "$title in:title" --json number,title \
+                        --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+
+          body="$(cat <<EOF
+          **Detected:** $(date -u '+%Y-%m-%dT%H:%M:%SZ') by \`.github/workflows/uptime.yml\`
+          **Target:** ${APP_URL}
+
+          $detail
+
+          <details><summary>/health response</summary>
+
+          \`\`\`json
+          ${HEALTH_BODY}
+          \`\`\`
+
+          </details>
+
+          **Next:** $runbook
+
+          Dashboards: \`${APP_URL}/ops\` (works with no monitoring stack attached) and, locally,
+          \`pnpm obs:up\` then http://localhost:3001.
+
+          _This issue is deduplicated by title: while the condition persists, this workflow
+          comments here instead of opening another. Close it when the incident is resolved,
+          and write the postmortem into \`docs/postmortems/\`._
+          EOF
+          )"
+          # Strip the heredoc's leading indentation so the Markdown renders.
+          body="$(printf '%s\n' "$body" | sed 's/^          //')"
+
+          if [ -n "$existing" ]; then
+            echo "Incident #$existing is already open; adding a comment instead."
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --label incident --body "$body"
+          fi
+
+      - name: Fail the run so the workflow badge goes red
+        if: steps.health.outputs.down == 'true' || steps.sli.outputs.breach == 'true'
+        run: |
+          echo "::error::Uptime check failed — see the incident issue."
+          exit 1

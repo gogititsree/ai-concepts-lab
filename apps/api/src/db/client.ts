@@ -30,8 +30,64 @@ export interface DbClient {
 export interface CreateDbClientOptions {
   /** Defaults to `config.DB_POOL_MAX`. */
   max?: number;
-  /** Seconds a query may run before postgres.js aborts it. 0 disables the timeout. */
+  /** Seconds to wait for a new connection to be established. */
   connectTimeout?: number;
+  /** Seconds an unused connection is kept before it is closed. */
+  idleTimeout?: number;
+}
+
+/**
+ * Pool timings (M13), sized for **Render free + a pooled Neon endpoint**. Each number is
+ * a tradeoff, not a default someone liked:
+ *
+ * `IDLE_TIMEOUT_SECONDS = 30` — postgres.js keeps idle connections open forever unless
+ * told otherwise. On Neon's free plan that is actively harmful in two ways: idle client
+ * connections occupy slots in the pooler that the pre-deploy migration job and any
+ * ad-hoc `psql` also need, and an always-open connection is exactly the thing that keeps
+ * a scale-to-zero compute awake and burning the monthly allowance. The cost of closing
+ * them is one TCP+TLS handshake on the next request after half a minute of silence —
+ * which, on a free instance that the platform puts to sleep after fifteen minutes
+ * anyway, is a rounding error next to the cold start the user already absorbed.
+ *
+ * `CONNECT_TIMEOUT_SECONDS = 10` — long enough for Neon to resume a suspended compute
+ * (single-digit seconds, and the *first* connection after a sleep is the slow one),
+ * short enough that a genuinely unreachable database surfaces as a failed request rather
+ * than as a hung one. A request that waits 60 s for a connection has already lost the
+ * user; it just has not told them yet.
+ *
+ * `MAX_LIFETIME_SECONDS = 900` — connections are recycled every ~15 minutes even when
+ * busy. A long-lived connection through a proxy that may itself be redeployed, rotated
+ * or scaled is a connection that will eventually be closed *by someone else*, mid-query;
+ * retiring them on our own schedule turns that into a handshake instead of an error.
+ */
+export const IDLE_TIMEOUT_SECONDS = 30;
+export const CONNECT_TIMEOUT_SECONDS = 10;
+export const MAX_LIFETIME_SECONDS = 900;
+
+/**
+ * Does this connection string point at a transaction-mode connection pooler?
+ *
+ * Neon's pooled endpoint is the same host with `-pooler` inserted
+ * (`ep-x-123-pooler.eu-central-1.aws.neon.tech`), and `?pgbouncer=true` is the
+ * convention other providers use. It matters because postgres.js uses **named prepared
+ * statements** by default, and in transaction pooling mode consecutive queries from one
+ * client can land on different server connections — so a prepared statement is either
+ * missing (`prepared statement "s1" does not exist`) or duplicated, depending on which
+ * way the deal goes. Neon's pooler does implement prepared-statement tracking, but this
+ * is a failure that can only appear in production, cannot appear in CI (which runs a
+ * direct `postgres:16-alpine`), and costs nothing to rule out: this app's queries are
+ * small and infrequent, so the plan-caching that `prepare` buys is not measurable here.
+ *
+ * Exported for the test, and because "which mode am I in?" is a question the runbook
+ * asks.
+ */
+export function isPooledConnectionString(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.includes('-pooler.') || parsed.searchParams.get('pgbouncer') === 'true';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -44,7 +100,12 @@ export interface CreateDbClientOptions {
 export function createDbClient(url: string, opts: CreateDbClientOptions = {}): DbClient {
   const sql = postgres(url, {
     max: opts.max ?? config.DB_POOL_MAX,
-    connect_timeout: opts.connectTimeout ?? 10,
+    connect_timeout: opts.connectTimeout ?? CONNECT_TIMEOUT_SECONDS,
+    idle_timeout: opts.idleTimeout ?? IDLE_TIMEOUT_SECONDS,
+    max_lifetime: MAX_LIFETIME_SECONDS,
+    // Only through a transaction-mode pooler; a direct connection (local, CI) keeps
+    // prepared statements. See `isPooledConnectionString`.
+    prepare: !isPooledConnectionString(url),
     // Drizzle handles its own type parsing; leaving `transform` at the default keeps
     // column names exactly as written in schema.ts.
     onnotice: () => {},

@@ -1,0 +1,210 @@
+# Provisioned Grafana alert rules (M14) — the five thresholds in the table in
+# `docs/05-quality-and-ops.md`, one rule each, each naming the runbook that answers it.
+#
+# These fire into Grafana's own notification list, which is enough to *practise* alert
+# tuning without paying for a pager. Production paging is the external uptime check
+# (`.github/workflows/uptime.yml` and UptimeRobot); see `docs/slo.md` for the split.
+#
+# Two things worth noticing in the expressions below:
+#
+#  - **Every ratio clamps its denominator.** `clamp_min(..., 0.0001)` is not cosmetic: a
+#    rate over an idle period is 0, and `0/0` is NaN, which Grafana's threshold condition
+#    treats as "no data" — configurable to either alerting or OK, and either choice is
+#    wrong. An alert that goes off every time nobody is using the app teaches you to
+#    ignore alerts, which is the only genuinely dangerous outcome here.
+#  - **`for:` is the threshold's other half.** docs/05 says "p95 > 30 s **for 15 min**",
+#    and a rule without the pending period would page for one cold model load.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: agent-slis
+    folder: AI Concepts Lab
+    interval: 1m
+    rules:
+      - uid: lab-alert-model-p95
+        title: Model call p95 above 30 s
+        condition: threshold
+        for: 15m
+        annotations:
+          summary: 'Model p95 has been over the 30 s SLO for 15 minutes'
+          runbook_url: 'https://github.com/SreeNair/ai-concepts-lab/blob/main/docs/runbooks/slow-inference.md'
+          description: >-
+            p95 of model_call_duration_seconds is above the docs/slo.md threshold.
+            Usual causes, in order of likelihood: a cold model load (20-40 s on this
+            hardware), a second model resident at the same time, or a prompt that grew
+            because more tools were attached (measured: six tools instead of one took a
+            first call from 23 s to 71 s). Runbook: docs/runbooks/slow-inference.md
+        labels:
+          severity: warning
+          signal: latency
+        data:
+          - refId: query
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: lab-prometheus
+            model:
+              refId: query
+              editorMode: code
+              instant: true
+              expr: 'histogram_quantile(0.95, sum by (le) (rate(model_call_duration_seconds_bucket[15m])))'
+          - refId: threshold
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator: { type: gt, params: [30] }
+        noDataState: OK
+        execErrState: OK
+
+      - uid: lab-alert-model-errors
+        title: Model call error rate above 20 %
+        condition: threshold
+        for: 10m
+        annotations:
+          summary: 'More than a fifth of model calls are failing'
+          runbook_url: 'https://github.com/SreeNair/ai-concepts-lab/blob/main/docs/runbooks/model-provider-down.md'
+          description: >-
+            model_call_errors_total as a share of all model calls over ten minutes.
+            Check the `code` label first: `unavailable` means Ollama is not answering,
+            `timeout` means it is answering too slowly, `http` means it answered with a
+            status we did not expect. Runbook: docs/runbooks/model-provider-down.md
+        labels:
+          severity: critical
+          signal: errors
+        data:
+          - refId: query
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: lab-prometheus
+            model:
+              refId: query
+              editorMode: code
+              instant: true
+              expr: 'sum(rate(model_call_errors_total[10m])) / clamp_min(sum(rate(model_call_duration_seconds_count[10m])), 0.0001)'
+          - refId: threshold
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator: { type: gt, params: [0.2] }
+        noDataState: OK
+        execErrState: OK
+
+      - uid: lab-alert-parse-failures
+        title: Tool-call parse-failure rate above 10 %
+        condition: threshold
+        for: 5m
+        annotations:
+          summary: 'A tool schema and the model have stopped agreeing'
+          runbook_url: 'https://github.com/SreeNair/ai-concepts-lab/blob/main/docs/runbooks/parse-failure-spike.md'
+          description: >-
+            tool_call_parse_failures_total over all tool calls in the last hour, above the
+            docs/05 threshold. This counts only provider-side failures - arguments that
+            were not JSON at all - so the cause is the model, the prompt or the tool's
+            JSON Schema, and almost never the tool's code. Check whether a model tag or a
+            tool description changed recently.
+            Runbook: docs/runbooks/parse-failure-spike.md
+        labels:
+          severity: warning
+          signal: correctness
+        data:
+          - refId: query
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: lab-prometheus
+            model:
+              refId: query
+              editorMode: code
+              instant: true
+              expr: 'sum(rate(tool_call_parse_failures_total[1h])) / clamp_min(sum(rate(tool_execution_duration_seconds_count[1h])), 0.0001)'
+          - refId: threshold
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator: { type: gt, params: [0.1] }
+        noDataState: OK
+        execErrState: OK
+
+      - uid: lab-alert-bad-outcomes
+        title: Failed + max_iterations share above 25 %
+        condition: threshold
+        for: 15m
+        annotations:
+          summary: 'A quarter of runs are ending badly'
+          runbook_url: 'https://github.com/SreeNair/ai-concepts-lab/blob/main/docs/runbooks/runaway-loops.md'
+          description: >-
+            Runs that failed outright plus runs that hit the iteration cap, over all
+            finished runs in the last hour. Split them before doing anything: `failed`
+            with `MODEL_UNAVAILABLE` is the provider runbook, while `max_iterations` is a
+            prompt or a tool description degrading and never appears as an error at all.
+            Runbook: docs/runbooks/runaway-loops.md
+        labels:
+          severity: warning
+          signal: correctness
+        data:
+          - refId: query
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: lab-prometheus
+            model:
+              refId: query
+              editorMode: code
+              instant: true
+              expr: 'sum(increase(agent_runs_total{status=~"failed|max_iterations"}[1h])) / clamp_min(sum(increase(agent_runs_total[1h])), 0.0001)'
+          - refId: threshold
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator: { type: gt, params: [0.25] }
+        noDataState: OK
+        execErrState: OK
+
+      - uid: lab-alert-provider-down
+        title: Model provider down for 5 minutes
+        condition: threshold
+        for: 5m
+        annotations:
+          summary: 'model_provider_up has been 0 for five minutes'
+          runbook_url: 'https://github.com/SreeNair/ai-concepts-lab/blob/main/docs/runbooks/model-provider-down.md'
+          description: >-
+            The configured provider is not answering its liveness probe, or the chat model
+            is not pulled. The query excludes provider="none" on purpose: the deployed
+            free-tier instance runs no model by design (decision 1 in
+            docs/07-open-decisions.md) and would otherwise alert forever.
+            Runbook: docs/runbooks/model-provider-down.md
+        labels:
+          severity: critical
+          signal: availability
+        data:
+          - refId: query
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: lab-prometheus
+            model:
+              refId: query
+              editorMode: code
+              instant: true
+              expr: 'min(model_provider_up{provider!="none"})'
+          - refId: threshold
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: threshold
+              type: threshold
+              expression: query
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        # NoData here means "no provider that is supposed to exist", which is the
+        # `none` deployment and not an incident.
+        noDataState: OK
+        execErrState: OK

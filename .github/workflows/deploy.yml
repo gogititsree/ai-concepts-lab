@@ -48,29 +48,113 @@ jobs:
             echo "::error::APP_URL repository variable is not set"
             exit 1
           fi
-          deadline=$(( $(date +%s) + 300 ))   # 5 minutes; a free instance also cold-starts
+          # Five minutes, as docs/github-setup.md promises. It has to cover: Render
+          # pulling and starting the image, the pre-deploy migration, and — because a
+          # free instance sleeps — a 30-60 s cold start on the very first request.
+          deadline=$(( $(date +%s) + 300 ))
+          # --max-time 45, not 15: the first poll is usually the request that *wakes* the
+          # instance, and a 15 s timeout turns a normal cold start into a failed curl.
           until [ "$(date +%s)" -ge "$deadline" ]; do
-            body=$(curl --fail --silent --max-time 15 "$APP_URL/api/v1/health" || true)
+            body=$(curl --fail --silent --max-time 45 "$APP_URL/api/v1/health" || true)
             version=$(printf '%s' "$body" | jq -r '.version // empty' 2>/dev/null || true)
             status=$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)
             echo "health: status=${status:-<none>} version=${version:-<none>} (want $EXPECTED_SHA)"
-            if [ "$version" = "$EXPECTED_SHA" ] && [ "$status" = "ok" ]; then
+            # `degraded` counts as up, exactly as docs/05-quality-and-ops.md specifies:
+            # the deployment runs MODEL_PROVIDER=none by design (decision 1), so a
+            # dependency check that reports a missing model must not fail a deploy.
+            # Only `down` — which means the database is unreachable — is a failure.
+            if [ "$version" = "$EXPECTED_SHA" ] && { [ "$status" = "ok" ] || [ "$status" = "degraded" ]; }; then
               echo "Deployed version matches the commit."
               exit 0
             fi
             sleep 10
           done
           echo "::error::Timed out waiting for $APP_URL to report version $EXPECTED_SHA"
+          echo "::error::If /health never answered at all, check the Render event log: a" \
+               "failed pre-deploy migration blocks the new instance from starting." \
+               "Runbook: docs/runbooks/db-migration-failed.md"
           exit 1
 
-      - name: Smoke check
+      # `/health` proves the process is alive and reports the right commit. It proves
+      # nothing about the application: it does not touch the router, the auth stack, the
+      # static file server or the security headers. Each check below is one of those,
+      # chosen because it fails loudly for a *different* reason.
+      #
+      # Deliberately not here: a run-page check. docs/05 asks for one, and it is not
+      # possible on this deployment, for two independent reasons. (1) Creating a run
+      # requires a full session — register, enroll a second factor, log in with a TOTP —
+      # which would mean a real account's password and TOTP seed living in CI secrets,
+      # and a smoke test that writes rows into the production database on every deploy.
+      # (2) Even with credentials there is nothing to check: the instance runs
+      # MODEL_PROVIDER=none (decision 1), so `POST /model/runs` answers 503 by design.
+      # The substitute is the `model/health` assertion below, which verifies the same
+      # decision is actually in force rather than pretending a run could happen. The
+      # full journey is covered by the Playwright suite in `ci.yml`, against a build of
+      # the same commit, before this workflow ever runs.
+      - name: Post-deploy smoke check
         env:
           APP_URL: ${{ vars.APP_URL }}
           EXPECTED_SHA: ${{ steps.sha.outputs.sha }}
         run: |
-          body=$(curl --fail --silent --show-error --max-time 15 "$APP_URL/api/v1/health")
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          echo "--- /api/v1/health"
+          body=$(curl --fail --silent --show-error --max-time 30 "$APP_URL/api/v1/health")
           echo "$body"
-          echo "$body" | jq -e --arg sha "$EXPECTED_SHA" '.status == "ok" and .version == $sha' > /dev/null
-          # The SPA must be served from the same origin as the API.
-          curl --fail --silent --show-error --max-time 15 "$APP_URL/" | grep -q '<div id="root">'
+          echo "$body" | jq -e --arg sha "$EXPECTED_SHA" \
+            '(.status == "ok" or .status == "degraded") and .version == $sha' > /dev/null \
+            || fail "/health is not reporting the expected commit"
+          # The database is the one dependency whose failure means `down`, and a green
+          # deploy whose database is unreachable is the worst kind of green.
+          echo "$body" | jq -e '.checks.db.ok == true' > /dev/null \
+            || fail "the instance cannot reach its database"
+
+          echo "--- /api/v1/modules (expect 401)"
+          # Two facts in one request: the API router is mounted (a 404 here would mean
+          # the SPA fallback is swallowing /api), and the session guard is on. A 200
+          # would mean the content API is exposed to the internet unauthenticated,
+          # which is the single most expensive regression this file can catch.
+          code=$(curl --silent --output /dev/null --max-time 30 \
+                   --write-out '%{http_code}' "$APP_URL/api/v1/modules")
+          [ "$code" = "401" ] || fail "GET /api/v1/modules returned $code, expected 401"
+
+          echo "--- /api/v1/model/health (expect provider none)"
+          # Decision 1, verified rather than assumed: the free tier has no model, and
+          # modules 4-6 must show the "run it locally" banner. If this ever says
+          # `ollama`, the deployment is about to spend 90 s per request failing to reach
+          # a localhost that does not exist.
+          curl --fail --silent --show-error --max-time 30 "$APP_URL/api/v1/model/health" \
+            | tee /dev/stderr | jq -e '.provider == "none"' > /dev/null \
+            || fail "the deployed instance is not running MODEL_PROVIDER=none"
+
+          echo "--- / (expect the SPA)"
+          # The API serves the built bundle from its own origin; if `apps/web/dist` were
+          # missing from the image, the API would still be perfectly healthy and the
+          # site would be a 404. Checked by content, not status code, because the SPA
+          # history fallback returns 200 for almost anything.
+          index=$(curl --fail --silent --show-error --max-time 30 "$APP_URL/")
+          printf '%s' "$index" | grep -q '<div id="root">' \
+            || fail "GET / did not return the SPA shell"
+          # And the bundle it references is actually served, not just named. `-f` makes
+          # a 404 on the asset a non-zero exit.
+          # `|| true`: with `set -euo pipefail`, a grep that matches nothing (or one that
+          # `head` closes the pipe on) would abort the script before `fail` could say why.
+          asset=$(printf '%s' "$index" | grep -o '/assets/index-[A-Za-z0-9_-]*\.js' | head -n1 || true)
+          [ -n "$asset" ] || fail "no JS bundle referenced from index.html"
+          curl --fail --silent --show-error --max-time 30 --output /dev/null "$APP_URL$asset" \
+            || fail "the JS bundle at $asset is not being served"
+
+          echo "--- security headers"
+          # M13's headers are invisible until something is broken by their absence, so
+          # they get asserted where a regression is cheap to notice. `-D-` dumps headers
+          # only; the body is discarded.
+          headers=$(curl --fail --silent --show-error --max-time 30 -D- -o /dev/null "$APP_URL/")
+          printf '%s' "$headers" | grep -qi '^content-security-policy:' \
+            || fail "no Content-Security-Policy on the SPA response"
+          printf '%s' "$headers" | grep -qi '^strict-transport-security:' \
+            || fail "no HSTS header (is COOKIE_SECURE=true on the instance?)"
+          printf '%s' "$headers" | grep -qi '^x-content-type-options: *nosniff' \
+            || fail "no X-Content-Type-Options: nosniff"
+
           echo "Smoke check passed."
