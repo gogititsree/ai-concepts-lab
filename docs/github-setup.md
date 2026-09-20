@@ -27,6 +27,20 @@ and the Docker layer caches are all cold.
 
 ### Required status checks and branch protection
 
+> **Done, except the protection itself.** The repository is live at
+> <https://github.com/gogititsree/ai-concepts-lab> (private) and CI runs green on `main`.
+> The `gh api` call below returns **403: "Upgrade to GitHub Pro or make this repository
+> public to enable this feature."** Branch protection on a private repository is a paid
+> feature. Two ways forward: make the repository public (`gh repo edit --visibility public`)
+> and re-run the call, or leave it private and keep the branch-per-milestone discipline by
+> convention. The status checks themselves work either way -- a pull request still shows
+> red -- the only thing missing is GitHub *enforcing* it.
+>
+> The exact check names, confirmed from the first green run, are:
+> `Lint, format and types`, `Unit tests`,
+> `Integration tests and coverage gate (Postgres)`, `End-to-end (Playwright)`.
+
+
 `CLAUDE.md` mandates branch-per-milestone, so make `main` enforce it:
 
 ```bash
