@@ -27,18 +27,27 @@ and the Docker layer caches are all cold.
 
 ### Required status checks and branch protection
 
-> **Done, except the protection itself.** The repository is live at
-> <https://github.com/gogititsree/ai-concepts-lab> (private) and CI runs green on `main`.
-> The `gh api` call below returns **403: "Upgrade to GitHub Pro or make this repository
-> public to enable this feature."** Branch protection on a private repository is a paid
-> feature. Two ways forward: make the repository public (`gh repo edit --visibility public`)
-> and re-run the call, or leave it private and keep the branch-per-milestone discipline by
-> convention. The status checks themselves work either way -- a pull request still shows
-> red -- the only thing missing is GitHub *enforcing* it.
+> **Done.** The repository is live and public at
+> <https://github.com/gogititsree/ai-concepts-lab>, CI runs green on `main`, and branch
+> protection is applied and enforced. Nothing below needs doing again; it is kept as the
+> record of what was configured.
 >
-> The exact check names, confirmed from the first green run, are:
+> Protection on a private repository is a paid feature, which is why this repository is
+> public. The required checks, confirmed from the first green run, are
 > `Lint, format and types`, `Unit tests`,
-> `Integration tests and coverage gate (Postgres)`, `End-to-end (Playwright)`.
+> `Integration tests and coverage gate (Postgres)` and `End-to-end (Playwright)`.
+>
+> **`enforce_admins` is on**, so the protection applies to you too. Without it the rules
+> are decorative on a solo project: the owner is the only person pushing, and an admin
+> bypass means a direct push to `main` succeeds with a warning. With it on, every change
+> goes through a pull request. Reviews are *not* required, so you can merge your own once
+> the four checks pass. To lift it temporarily:
+>
+> ```bash
+> gh api -X DELETE repos/gogititsree/ai-concepts-lab/branches/main/protection/enforce_admins
+> # ...and to put it back
+> gh api -X POST   repos/gogititsree/ai-concepts-lab/branches/main/protection/enforce_admins
+> ```
 
 
 `CLAUDE.md` mandates branch-per-milestone, so make `main` enforce it:
