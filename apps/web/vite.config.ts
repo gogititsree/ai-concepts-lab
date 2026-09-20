@@ -9,9 +9,18 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      // Bundle the workspace package from source: dev, test and build then never depend
-      // on packages/shared having been compiled to dist first.
+      // Bundle the workspace packages from source: dev, test and build then never depend
+      // on them having been compiled to dist first.
+      //
+      // `@lab/nn-core` was missing here until the first CI run. Locally it resolved
+      // through its `dist/`, which is always present once you have run `pnpm build` even
+      // once -- so six web test files passed on every laptop and failed on a clean
+      // checkout with "Failed to resolve entry for package". A stale build artefact was
+      // standing in for a config entry.
       '@lab/shared': fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),
+      '@lab/nn-core': fileURLToPath(
+        new URL('../../packages/nn-core/src/index.ts', import.meta.url),
+      ),
     },
   },
   server: {
