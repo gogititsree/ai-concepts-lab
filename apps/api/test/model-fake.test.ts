@@ -219,6 +219,9 @@ describe('the none provider and the factory', () => {
         NODE_ENV: 'production',
         SESSION_SECRET: 'x'.repeat(40),
         MFA_ENCRYPTION_KEY: 'a'.repeat(64),
+        // Required in production since M13; without it the boot fails before it gets
+        // as far as choosing a provider.
+        APP_ORIGIN: 'https://ai-concepts-lab.onrender.com',
       }).MODEL_PROVIDER,
     ).toBe('none');
   });

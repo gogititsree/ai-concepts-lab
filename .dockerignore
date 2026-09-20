@@ -1,6 +1,16 @@
+# What must never enter the build context. Two reasons, and the second is the one that
+# matters: a smaller context is faster, but an *excluded secret* is a secret that cannot
+# end up in a layer. `.env` is the one that would.
+#
+# Note the asymmetry with the Dockerfile: this file says what cannot come in, and the
+# Dockerfile still COPYs an explicit subset. Both are needed — ADR 0004's addendum is
+# the story of `content/` being a build input that the Dockerfile did not copy, which no
+# amount of .dockerignore would have caught.
 **/node_modules
 **/dist
 **/coverage
+**/coverage-gate
+**/*.tsbuildinfo
 .git
 .github
 .env
@@ -11,7 +21,12 @@ spike
 playwright-report
 test-results
 *.log
-**/coverage-gate
+# M14 tees the API's stdout here for Promtail; never part of an image.
+logs
+# The local Grafana/Prometheus/Loki profile is compose-only: nothing in the image reads it.
+docker/observability
 e2e
 playwright.config.ts
 tsconfig.e2e.json
+.vscode
+.idea

@@ -26,6 +26,11 @@ const GENERATED_KEYS = {
   // Exactly 32 bytes: AES-256. Plain base64 rather than base64url because that is what
   // `openssl rand -base64 32` and most secret managers emit, and config.ts decodes both.
   MFA_ENCRYPTION_KEY: { bytes: 32, encoding: 'base64' },
+  // M14: the bearer token for GET /metrics. 27 bytes -> 36 base64 characters, over the
+  // 24-character minimum. Generated rather than left blank because the local Prometheus
+  // in the `observability` compose profile needs a value to send, and "the scrape
+  // returns 503" is a confusing first experience of a monitoring stack.
+  METRICS_TOKEN: { bytes: 27, encoding: 'base64' },
 };
 
 function randomSecret({ bytes, encoding }) {

@@ -3,6 +3,12 @@
 #
 # Postgres is not used by the app until M4 -- it is here now so the compose file and the
 # volume/healthcheck plumbing are in place and reviewed once.
+#
+# M14 adds a second, opt-in stack behind `profiles: [observability]`: Prometheus, Grafana,
+# Loki and Promtail. It is a *profile* rather than a second compose file so that one
+# `docker compose down` takes everything with it, and so `pnpm db:up` -- which names no
+# profile -- still starts Postgres and nothing else. See
+# `docker/observability/README.md` for the commands.
 services:
   postgres:
     image: postgres:16-alpine
@@ -23,5 +29,99 @@ services:
       retries: 5
       start_period: 10s
 
+  # ---------------------------------------------------------- observability (M14) ----
+  # `docker compose --env-file .env -f docker/docker-compose.yml --profile observability up -d`
+  # (or `pnpm obs:up`). Everything here watches the API running **on the host**.
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: lab-prometheus
+    profiles: [observability]
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # A learning stack keeps a week; the alert windows are minutes and the SLO
+      # windows are read from `/ops/sli` (Postgres), not from here.
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    secrets:
+      - metrics_token
+    # `host.docker.internal` resolves on Docker Desktop by itself; this line is what
+    # makes the same config work on Linux, where it does not.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: lab-grafana
+    profiles: [observability]
+    restart: unless-stopped
+    # 3001, because 3000 is the API. Getting this wrong produces a Grafana that cannot
+    # scrape the app it is running on top of, which is a confusing ten minutes.
+    ports:
+      - '3001:3000'
+    environment:
+      # Localhost-only learning stack: anonymous admin so the dashboard is one click
+      # from the terminal. Never do this anywhere a network can reach.
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_USERS_DEFAULT_THEME: system
+      GF_LOG_LEVEL: warn
+      # Land on the provisioned dashboard rather than on an empty home page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/agent.json
+      GF_FEATURE_TOGGLES_ENABLE: ''
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: lab-loki
+    profiles: [observability]
+    restart: unless-stopped
+    command: ['-config.file=/etc/loki/loki-config.yml']
+    ports:
+      - '3100:3100'
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    container_name: lab-promtail
+    profiles: [observability]
+    restart: unless-stopped
+    command: ['-config.file=/etc/promtail/promtail-config.yml']
+    volumes:
+      - ./observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # The API writes to stdout; the documented recipe tees it into this file. The
+      # directory is created by Docker if it does not exist, so a first run works.
+      - ../logs:/var/log/lab:ro
+      - promtail-data:/tmp
+    depends_on:
+      - loki
+
+# `environment:` as a secret source means the token is never written into a config file
+# and never appears in `docker inspect`'s environment list for the container that uses
+# it. Prometheus reads it from /run/secrets/metrics_token.
+secrets:
+  metrics_token:
+    environment: METRICS_TOKEN
+
 volumes:
   postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  promtail-data:

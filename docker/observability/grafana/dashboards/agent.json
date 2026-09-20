@@ -1,0 +1,370 @@
+{
+  "uid": "lab-agent-slis",
+  "title": "AI Concepts Lab — agent SLIs",
+  "description": "Every metric in the table in docs/05-quality-and-ops.md, in the order that table lists them. The thresholds on each panel are the alert thresholds in docs/slo.md and docker/observability/grafana/provisioning/alerting/rules.yml; if they ever disagree, the docs are right.",
+  "tags": ["ai-concepts-lab", "m14", "sre"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "editable": true,
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Is the model there, and how slow is it",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "model_provider_up",
+      "description": "1 when the configured provider answers its liveness probe with the chat model pulled. Zero for five minutes is an alert — unless the deployment is deliberately running MODEL_PROVIDER=none, which is the free-tier case.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "model_provider_up",
+          "legendFormat": "{{provider}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "UP", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 2,
+      "title": "model_call_duration_seconds — p50 / p95",
+      "description": "Per call, not per run. The SLO is p95 < 30 s over 7 days; the bucket boundary sits exactly on 30 so the quantile does not have to interpolate across it. Cold model loads are the usual reason for a spike (20–40 s on this hardware).",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 6, "w": 11, "x": 5, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, provider) (rate(model_call_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50 {{provider}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(model_call_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 {{provider}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 30 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Model call error rate",
+      "description": "model_call_errors_total over model_call_duration_seconds_count. Above 20 % for ten minutes is an alert: see docs/runbooks/model-provider-down.md.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(model_call_errors_total[$__rate_interval])) / clamp_min(sum(rate(model_call_duration_seconds_count[$__rate_interval])), 0.0001)",
+          "legendFormat": "error share",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (code) (rate(model_call_errors_total[$__rate_interval]))",
+          "legendFormat": "{{code}}/s",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "The loop: outcomes, iterations, tools",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "agent_runs_total by status",
+      "description": "Four terminal statuses kept distinct on purpose. A rising max_iterations share is a prompt degrading and never appears as an error; a rising cancelled share is people giving up on the wait.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status) (increase(agent_runs_total[$__rate_interval]))",
+          "legendFormat": "{{status}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "failed + max_iterations share",
+      "description": "The docs/05 alert: above 25 % of finished runs. See docs/runbooks/runaway-loops.md.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 5, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(agent_runs_total{status=~\"failed|max_iterations\"}[1h])) / clamp_min(sum(increase(agent_runs_total[1h])), 1)",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.15 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "bargauge",
+      "id": 6,
+      "title": "agent_run_iterations — distribution",
+      "description": "Cumulative histogram buckets (1, 2, 3, 5, 8, 15). Read the shape, never the mean: mass piling up at the 15 bucket is a runaway loop, which is a bounded outcome rather than a crash and so never shows as an error.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 7, "x": 17, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (increase(agent_run_iterations_bucket[$__range]))",
+          "legendFormat": "≤ {{le}}",
+          "instant": true,
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "options": { "displayMode": "gradient", "orientation": "horizontal" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Tool-call parse-failure rate",
+      "description": "tool_call_parse_failures_total over tool_execution_duration_seconds_count, per tool. Provider-side only: arguments that parse but fail the schema are a different bug and are not in this counter (docs/adr/0002). Above 10 % over an hour is an alert — docs/runbooks/parse-failure-spike.md.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 15 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tool) (rate(tool_call_parse_failures_total[$__rate_interval])) / clamp_min(sum by (tool) (rate(tool_execution_duration_seconds_count[$__rate_interval])), 0.0001)",
+          "legendFormat": "{{tool}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (recovered) (rate(tool_call_parse_failures_total[$__rate_interval]))",
+          "legendFormat": "recovered={{recovered}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "tool_execution_duration_seconds — p95, and structured-output retries",
+      "description": "Tool execution measured 2–9 ms in every run, so this panel is mostly a flat line near zero — which is the point: when it is not, the time is going somewhere other than inference and that is a bug. structured_output_retries_total is on the same panel because a rising retry rate is the leading indicator that a schema, a prompt or a model version drifted (decision 16).",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 15 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(tool_execution_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 {{tool}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (increase(structured_output_retries_total[$__rate_interval]))",
+          "legendFormat": "retries {{outcome}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "The service around the loop",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "http_request_duration_seconds — p95 by route (non-model)",
+      "description": "The SLO is p95 < 800 ms for non-model routes. /model/chat is excluded here because it is a 6–45 s request by design and would be the only thing on the chart; its latency lives in the model panel above.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 23 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{route!~\".*/model/(chat|embed)\"}[$__rate_interval])))",
+          "legendFormat": "{{route}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Database and sessions",
+      "description": "db_query_duration_seconds p95, db_pool_waiting and sessions_active. The pool gauge is queries waiting for a connection: anything above zero for long means DB_POOL_MAX is the bottleneck.",
+      "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 23 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, query) (rate(db_query_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 {{query}}",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "db_pool_waiting",
+          "legendFormat": "pool waiting",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        },
+        {
+          "refId": "C",
+          "expr": "sessions_active",
+          "legendFormat": "sessions active",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "logs",
+      "id": 11,
+      "title": "API logs (Loki)",
+      "description": "The same pino JSON lines the API writes, tailed by Promtail. Every line carries reqId, and every HTTP response carries the same value as x-request-id — which is how you get from a metric spike to the exact request in two clicks.",
+      "datasource": { "type": "loki", "uid": "lab-loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{job=\"api\"}",
+          "datasource": { "type": "loki", "uid": "lab-loki" }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      }
+    }
+  ]
+}

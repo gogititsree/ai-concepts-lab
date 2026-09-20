@@ -2,6 +2,7 @@ import { buildApp } from './app.js';
 import { startHousekeeping } from './auth/housekeeping.js';
 import { config } from './config.js';
 import { closeDb } from './db/client.js';
+import { installShutdownHandlers } from './plugins/shutdown.js';
 
 const app = await buildApp({ config });
 
@@ -17,15 +18,15 @@ try {
   process.exit(1);
 }
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    app.log.info({ signal }, 'shutting down');
-    housekeeping.stop();
-    // Close the HTTP server first so in-flight requests finish, then drain the pool:
-    // ending it earlier would fail those requests instead of letting them complete.
-    void app
-      .close()
-      .then(() => closeDb())
-      .then(() => process.exit(0));
-  });
-}
+// SIGTERM is not an edge case here: it is how Render ends every deploy and every
+// free-tier sleep. The ordering (stop timers, close the server so in-flight requests
+// finish, *then* drain the pool) and the failure handling live in
+// `plugins/shutdown.ts`, where they are unit-tested; this file only says what the parts
+// are. See that module's header for why the pool drain matters on Neon.
+installShutdownHandlers({
+  log: app.log,
+  closeServer: () => app.close(),
+  closeDb,
+  stopBackgroundWork: () => housekeeping.stop(),
+  exit: (code) => process.exit(code),
+});

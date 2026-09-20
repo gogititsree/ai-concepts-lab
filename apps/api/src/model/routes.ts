@@ -26,6 +26,13 @@ import { z } from 'zod';
 
 import { authContext, requireFullSession } from '../auth/guards.js';
 import { AppError, isAppError, notFound, rateLimited } from '../lib/errors.js';
+import {
+  countRunFinished,
+  countStructuredRetries,
+  modelErrorClass,
+  observeModelCall,
+  setModelProviderUp,
+} from '../plugins/metrics.js';
 import { FixedWindowLimiter } from '../plugins/rate-limit.js';
 import { runAgentLoop } from './agentLoop.js';
 import { createProvider, modelUnavailable, type ModelProvider } from './provider.js';
@@ -228,6 +235,10 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
     { schema: { response: { 200: ModelHealthResponseSchema } } },
     async () => {
       const health = await provider.health();
+      // M14: the UI polls this every 15 s while an exercise page is open, which makes it
+      // the freshest evidence available about `model_provider_up`. The metrics plugin
+      // probes independently for the case where nobody is looking.
+      setModelProviderUp(provider.name, health.ok);
       return {
         provider: provider.name,
         ok: health.ok,
@@ -326,21 +337,42 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
         let attempts: ChatResponse[];
         let response: ChatResponse;
         let structuredResult: StructuredOutputResult | undefined;
+        const callStartedAt = Date.now();
         try {
           if (structured) {
             const outcome = await runStructuredChat(provider, chatRequest, controller.signal);
             attempts = outcome.attempts;
             response = outcome.response;
             structuredResult = outcome.result;
+            // M14 / decision 16: one retry per extra attempt, labelled by whether the
+            // retry actually produced valid output. A rising `exhausted` share is a
+            // prompt, a schema or a model version that has drifted.
+            countStructuredRetries(attempts.length - 1, outcome.result.valid);
           } else {
             response = await provider.chat(chatRequest, controller.signal);
             attempts = [response];
+          }
+          // M14: one observation per model call, so a structured retry is two points on
+          // the latency histogram rather than one slow one.
+          for (const attempt of attempts) {
+            observeModelCall({
+              provider: provider.name,
+              model,
+              outcome: 'success',
+              durationMs: attempt.latencyMs,
+            });
           }
         } catch (error) {
           settled = true;
           const appError = isAppError(error)
             ? error
             : new AppError(500, 'INTERNAL_ERROR', 'Model call failed');
+          observeModelCall({
+            provider: provider.name,
+            model,
+            outcome: modelErrorClass(appError.code),
+            durationMs: Date.now() - callStartedAt,
+          });
           await recorder.step({
             kind: 'error',
             iteration: 1,
@@ -348,8 +380,9 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             isError: true,
           });
           if (ownsRun) {
+            const status = appError.code === 'REQUEST_ABORTED' ? 'cancelled' : 'failed';
             await recorder.finish({
-              status: appError.code === 'REQUEST_ABORTED' ? 'cancelled' : 'failed',
+              status,
               iterationCount: 1,
               toolCallCount: 0,
               toolParseFailureCount: 0,
@@ -359,6 +392,7 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
               errorCode: appError.code,
               errorMessage: appError.message,
             });
+            countRunFinished(structured ? 'structured' : 'prompt', status, 1);
           }
           throw appError;
         }
@@ -400,6 +434,8 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
             modelLatencyMsTotal: totals.latencyMs,
             finalOutput: response.message.content,
           });
+          // M14: prompt/structured runs finish here, not in the agent loop.
+          countRunFinished(structured ? 'structured' : 'prompt', 'completed', totals.iterations);
         } else {
           // Appending to a run somebody else is driving: M11's in-browser harness, which
           // opened a `harness` run and calls this endpoint once per iteration.
@@ -774,6 +810,10 @@ export const modelRoutes: FastifyPluginAsync<ModelRoutesOptions> = async (app, o
         if (finalOutput !== null && (await markCompleted(app.db, runId, finalOutput))) {
           const summary = await loadRunSummary(app.db, runId);
           if (summary) bus.publish(runId, { type: 'end', run: summary });
+          // M14: a harness run's terminal status is decided here, by the browser's own
+          // loop reporting its `final` step. `iterationCount` comes from the row because
+          // this request only saw the last batch of steps.
+          countRunFinished('harness', 'completed', summary?.iterationCount ?? 0);
         }
 
         return reply.code(201).send({ steps: written });

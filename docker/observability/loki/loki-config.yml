@@ -1,0 +1,56 @@
+# Loki, single-binary, filesystem-backed, no auth. Correct for a laptop and wrong for
+# anything else — which is why this file lives under `docker/observability/` and is only
+# reachable through the `observability` compose profile.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # The API's pino lines are small, but a `thinking` block echoed into a debug log is
+  # not. 256 KB is well above anything this app emits and well below "one line filled
+  # the disk".
+  max_line_size: 262144
+  reject_old_samples: false
+  # A learning stack keeps a week. Long enough to look at last Tuesday's incident,
+  # short enough that a laptop does not notice.
+  retention_period: 168h
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+
+analytics:
+  reporting_enabled: false

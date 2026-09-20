@@ -12,6 +12,13 @@ import {
 
 import type { Db } from '../db/client.js';
 import { AppError, isAppError } from '../lib/errors.js';
+import {
+  countRunFinished,
+  countToolParseFailure,
+  modelErrorClass,
+  observeModelCall,
+  observeToolExecution,
+} from '../plugins/metrics.js';
 import type { ModelProvider } from './provider.js';
 import { toRunStep, type StepWriter } from './runs.js';
 import { toolDefinitions, toolMap, type ToolContext, type ToolSpec } from './tools/index.js';
@@ -225,6 +232,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       errorCode,
       errorMessage,
     });
+    // M14: `agent_runs_total{kind,status}` + `agent_run_iterations{kind}`. Emitted here
+    // rather than at the call site so every exit path — completed, failed, cancelled and
+    // the max-iterations bounded outcome — is counted exactly once. `runAgentLoop` is
+    // only ever driven for an `agent` run; prompt/structured/harness runs are counted in
+    // `model/routes.ts` where they finish.
+    countRunFinished('agent', status, totals.iterationCount);
     return { status, finalOutput, ...totals, errorCode, errorMessage };
   };
 
@@ -235,6 +248,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       // ------------------------------------------------------------ model call ----
 
       let response: ChatResponse;
+      const callStartedAt = Date.now();
       try {
         response = await provider.chat(
           {
@@ -245,13 +259,37 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           },
           controller.signal,
         );
+        // M14: the latency SLI. `response.latencyMs` is the adapter's own measurement of
+        // the call, which is the number the trace already carries.
+        observeModelCall({
+          provider: provider.name,
+          model,
+          outcome: 'success',
+          durationMs: response.latencyMs,
+        });
       } catch (error) {
         // An abort surfaces from the provider as whatever *it* throws; the reason we
         // record comes from our own flag, not from guessing at the message.
-        if (stopped.reason !== 'none' || controller.signal.aborted) break;
+        if (stopped.reason !== 'none' || controller.signal.aborted) {
+          observeModelCall({
+            provider: provider.name,
+            model,
+            outcome: 'aborted',
+            durationMs: Date.now() - callStartedAt,
+          });
+          break;
+        }
         const appError = isAppError(error)
           ? error
           : new AppError(500, 'INTERNAL_ERROR', 'The model call failed');
+        // A failed call has no `latencyMs` of its own, so the wall clock around it is
+        // the honest measurement — and for a timeout it is the interesting one.
+        observeModelCall({
+          provider: provider.name,
+          model,
+          outcome: modelErrorClass(appError.code),
+          durationMs: Date.now() - callStartedAt,
+        });
         await emit({
           kind: 'error',
           iteration,
@@ -296,7 +334,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
         totals.toolCallCount += 1;
         const parsedByProvider = call.parseOk !== false;
-        if (!parsedByProvider) totals.toolParseFailureCount += 1;
+        if (!parsedByProvider) {
+          totals.toolParseFailureCount += 1;
+          // M14: `tool_call_parse_failures_total{tool,recovered}`. Only provider-side
+          // failures reach this branch — arguments that parse but fail the tool's Zod
+          // schema become a `tool_result` with `is_error` below and are deliberately not
+          // counted here (docs/adr/0002 §2). `recovered` is true when the fenced-JSON
+          // fallback in `ollama.ts` reconstructed a usable call out of prose.
+          countToolParseFailure(call.name, call.recovered === true);
+        }
 
         await emit({
           kind: 'tool_call',
@@ -363,13 +409,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           }
         }
 
+        const toolDurationMs = Date.now() - started;
+        // M14: `tool_execution_duration_seconds{tool,outcome}`. Measured 2–9 ms for every
+        // catalog tool, which is the point of having it next to the model histogram.
+        observeToolExecution(call.name, isError, toolDurationMs);
+
         await emit({
           kind: 'tool_result',
           iteration,
           toolName: call.name,
           toolResult: result ?? null,
           isError,
-          latencyMs: Date.now() - started,
+          latencyMs: toolDurationMs,
         });
 
         messages.push({

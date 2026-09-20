@@ -1,0 +1,60 @@
+# Promtail tails the API's log file and ships it to Loki.
+#
+# **The API writes to stdout, not to a file** — that is correct for a container and it is
+# what Render collects. So the local recipe is to tee it:
+#
+#     pnpm --filter api dev 2>&1 | tee -a logs/api.log
+#
+# and this config watches `logs/api.log`, mounted read-only into the container. The
+# alternative (Promtail reading the Docker socket) only works when the API is *in* a
+# container, and the whole point of this profile is to watch the app you are editing on
+# the host. The README spells out both.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  # Persisted in a volume so a restart resumes rather than re-shipping the file.
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: api
+          service: ai-concepts-lab
+          __path__: /var/log/lab/api.log
+    pipeline_stages:
+      # pino writes one JSON object per line. Parsing it here means Grafana gets real
+      # labels and a real timestamp instead of a wall of text with the container's
+      # arrival time on it.
+      - json:
+          expressions:
+            level: level
+            time: time
+            reqId: reqId
+            msg: msg
+      # pino's `level` is numeric (30 = info, 40 = warn, 50 = error). Loki wants a word,
+      # and "show me the errors" has to work without remembering the numbers.
+      - template:
+          source: severity
+          template: >-
+            {{ if eq .level "60" }}fatal{{ else if eq .level "50" }}error{{ else if eq .level "40" }}warn{{ else if eq .level "30" }}info{{ else if eq .level "20" }}debug{{ else }}trace{{ end }}
+      - labels:
+          severity:
+      # `reqId` is left as a parsed field rather than a label on purpose: it is unique per
+      # request, and a unique label value is a new Loki stream — the log-store equivalent
+      # of labelling a Prometheus metric with a URL. The datasource's derived field
+      # extracts it at query time instead.
+      - timestamp:
+          source: time
+          format: UnixMs
+          # A line that cannot be parsed keeps its arrival time rather than being dropped:
+          # pino-pretty output (dev mode) is not JSON and would otherwise vanish, which is
+          # exactly when you most want to see it.
+          action_on_failure: fudge

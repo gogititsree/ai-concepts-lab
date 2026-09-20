@@ -36,6 +36,9 @@ const DEV_SESSION_SECRET = 'dev-only-insecure-session-secret-do-not-use-in-produ
  */
 const DEV_MFA_ENCRYPTION_KEY = Buffer.from('dev-only-insecure-mfa-key-32byte').toString('base64');
 
+/** The Vite dev server. Used only outside production; see `APP_ORIGIN` below. */
+const DEV_APP_ORIGIN = 'http://localhost:5173';
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -53,9 +56,22 @@ const EnvSchema = z.object({
       (value) => value.startsWith('postgres://') || value.startsWith('postgresql://'),
       'must be a postgres:// or postgresql:// connection string',
     ),
-  // postgres.js opens connections lazily up to this many. Five is plenty for a solo app
-  // on a free tier (Neon counts connections), and integration tests set it to 1-2.
-  DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(5),
+  /**
+   * Ceiling on connections postgres.js will open (it opens them lazily, so this is a
+   * limit and not a reservation).
+   *
+   * **Three, not five** (M13). The number is set by the smallest budget in the chain,
+   * and on this deployment that is not the database: it is one Render free instance,
+   * 0.1 CPU, serving a solo learner, where three concurrent Postgres queries already
+   * means three concurrent requests doing real work. What the other two connections
+   * would buy is nothing; what they cost is real, because they are not the only client
+   * of the Neon project. The pre-deploy migration job, a `pnpm db:seed` from a shell and
+   * a psql session all draw from the same free-tier allowance, and the failure mode when
+   * it runs out is a deploy whose *migration* cannot connect — the worst possible moment.
+   *
+   * Integration tests override it to 1-2 per throwaway database (`test/setup/db.ts`).
+   */
+  DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(3),
 
   // ------------------------------------------------------------------- auth (M5) ----
 
@@ -74,8 +90,14 @@ const EnvSchema = z.object({
    * present must match it (CSRF defence #2, alongside `X-Requested-With`). In dev this is
    * the Vite dev server; in production the API serves the SPA, so it is the API's own
    * public URL.
+   *
+   * Optional here and defaulted to the Vite dev server in the transform below, but
+   * **required in production** (M13): `http://localhost:5173` is a *usable* default, and
+   * a usable default is the dangerous kind. A production instance that silently kept it
+   * would reject every write from its own SPA with a 403 that looks like a session bug,
+   * and would do so only for browsers that send `Origin` — i.e. intermittently.
    */
-  APP_ORIGIN: z.string().url().default('http://localhost:5173'),
+  APP_ORIGIN: z.string().url().optional(),
   /**
    * `Secure` on the session cookie. Defaults to true in production and false elsewhere,
    * because a `Secure` cookie is silently dropped over plain http://localhost — which
@@ -102,6 +124,56 @@ const EnvSchema = z.object({
    * undecryptable. Different blast radius, different key.
    */
   MFA_ENCRYPTION_KEY: z.string().optional(),
+
+  // ------------------------------------------------------------ maintenance (M13) ----
+
+  /**
+   * Bearer token for `POST /api/v1/ops/maintenance` (decision 13 in
+   * `docs/07-open-decisions.md`): in production the housekeeping that runs on an
+   * in-process timer locally is driven instead by a scheduled GitHub Actions workflow,
+   * which has no cookie and therefore no session.
+   *
+   * **Optional, even in production, and the route fails closed when it is absent** —
+   * deliberately, and against this file's usual rule that a production secret is
+   * mandatory. Housekeeping is retention, not correctness: an expired session is already
+   * refused by the guard. Making the token mandatory would convert "the cleanup schedule
+   * is not wired up yet" into "the site will not boot", which is a strictly worse
+   * outage for a strictly less important feature. `plugins/startup-log.ts` warns about
+   * it at boot instead, and `ops/maintenance.ts` answers 503 rather than running
+   * unauthenticated. See `docs/adr/0005-production-hardening.md`.
+   *
+   * 32 characters minimum for the same reason as `SESSION_SECRET`: it is compared with a
+   * constant-time equality, but a short token is guessable regardless of how it is
+   * compared, and this endpoint deletes rows.
+   */
+  MAINTENANCE_TOKEN: z.preprocess(
+    // `MAINTENANCE_TOKEN=` in a .env means "unset", not "a zero-length token that fails
+    // the length check". Runs before validation, unlike the `blankToUndefined` the two
+    // older secrets apply afterwards.
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.string().min(32, 'must be at least 32 characters').optional(),
+  ),
+
+  // ---------------------------------------------------------- observability (M14) ----
+
+  /**
+   * Bearer token for `GET /metrics` (`docs/01-architecture.md` → Ops, `docs/05` → SRE).
+   *
+   * Optional, and **`/metrics` fails closed (503) when it is absent** rather than serving
+   * the metrics unauthenticated. Same reasoning as `MAINTENANCE_TOKEN`: a metrics endpoint
+   * is not a secret store, but it is a detailed inventory of routes, error codes and
+   * traffic volumes, and the default posture for "you forgot to configure it" must be
+   * closed rather than public. Locally, `pnpm setup:env` writes one and the Prometheus
+   * container in the `observability` profile sends it.
+   *
+   * 24 characters rather than 32: this token grants read-only access to counters, not the
+   * ability to delete rows, so the floor is "not brute-forceable over the network" rather
+   * than `MAINTENANCE_TOKEN`'s "not guessable at all".
+   */
+  METRICS_TOKEN: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.string().min(24, 'must be at least 24 characters').optional(),
+  ),
 
   // ------------------------------------------------------------------ model (M9) ----
 
@@ -150,6 +222,19 @@ const ConfigSchema = EnvSchema.superRefine((env, ctx) => {
     });
   }
 
+  // M13. Unlike the two secrets around it, the danger here is not a weak value but a
+  // *working* one: without this check a production instance quietly believes its SPA is
+  // served from the Vite dev server.
+  if (env.NODE_ENV === 'production' && !blankToUndefined(env.APP_ORIGIN)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['APP_ORIGIN'],
+      message:
+        "is required in production — set it to this service's public URL, e.g. " +
+        'https://ai-concepts-lab.onrender.com',
+    });
+  }
+
   const mfaKey = blankToUndefined(env.MFA_ENCRYPTION_KEY);
   if (env.NODE_ENV === 'production' && !mfaKey) {
     ctx.addIssue({
@@ -176,7 +261,9 @@ const ConfigSchema = EnvSchema.superRefine((env, ctx) => {
   SESSION_SECRET: env.SESSION_SECRET ?? DEV_SESSION_SECRET,
   // `new URL(...).origin` normalises away a trailing slash and any path, so
   // `http://localhost:5173/` in a .env still compares equal to the browser's `Origin`.
-  APP_ORIGIN: new URL(env.APP_ORIGIN).origin,
+  // The fallback is only ever reached outside production; the superRefine above has
+  // already failed the boot otherwise.
+  APP_ORIGIN: new URL(env.APP_ORIGIN ?? DEV_APP_ORIGIN).origin,
   COOKIE_SECURE: env.COOKIE_SECURE ?? env.NODE_ENV === 'production',
   MFA_ENCRYPTION_KEY: blankToUndefined(env.MFA_ENCRYPTION_KEY) ?? DEV_MFA_ENCRYPTION_KEY,
   // Dev gets the real model, production gets nothing unless it is told otherwise, and a
@@ -201,7 +288,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // The CI image bakes GIT_SHA in as a build arg. When Render builds the image itself
     // there is no build arg, but Render injects the deployed commit as RENDER_GIT_COMMIT,
     // so deploy.yml can still poll /health until `version` matches the commit it shipped.
-    GIT_SHA: env.GIT_SHA ?? env.RENDER_GIT_COMMIT,
+    //
+    // `blankToUndefined`, not `??` (M13): the Dockerfile's `ENV GIT_SHA=${GIT_SHA}` with
+    // an empty build arg sets the variable to the *empty string*, which is defined, so
+    // `??` would keep it and the RENDER_GIT_COMMIT fallback would never fire. That is a
+    // one-character bug whose only symptom is a deploy that times out waiting for a
+    // version it will never see.
+    GIT_SHA: blankToUndefined(env.GIT_SHA) ?? blankToUndefined(env.RENDER_GIT_COMMIT),
   });
   if (!result.success) {
     const details = result.error.issues
