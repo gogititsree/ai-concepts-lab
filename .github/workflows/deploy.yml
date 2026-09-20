@@ -19,7 +19,29 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment: production
     steps:
+      # Is there anywhere to deploy to yet?
+      #
+      # Until docs/github-setup.md has been followed there is no Render service, no hook
+      # secret and no APP_URL -- and this workflow fires on every green CI run on main.
+      # It used to fail at the first missing value, so a repository that simply has not
+      # been deployed yet showed a red Deploy badge on every push. That is indistinguishable
+      # from a broken deployment, which is the one thing this badge exists to tell you.
+      # Skipping keeps the signal honest: red here means a deploy went wrong.
+      - name: Is a deployment target configured?
+        id: target
+        env:
+          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          if [ -z "$HOOK_URL" ] || [ -z "$APP_URL" ]; then
+            echo "::notice::No deployment target configured (RENDER_DEPLOY_HOOK_URL secret and/or APP_URL variable are unset). Skipping. See docs/github-setup.md."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve the commit being deployed
+        if: steps.target.outputs.configured == 'true'
         id: sha
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
@@ -29,6 +51,7 @@ jobs:
           fi
 
       - name: Trigger the Render deploy hook
+        if: steps.target.outputs.configured == 'true'
         env:
           HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
@@ -40,6 +63,7 @@ jobs:
           echo "Deploy hook accepted."
 
       - name: Wait for the new version to serve traffic
+        if: steps.target.outputs.configured == 'true'
         env:
           APP_URL: ${{ vars.APP_URL }}
           EXPECTED_SHA: ${{ steps.sha.outputs.sha }}
@@ -100,6 +124,7 @@ jobs:
       # with the columns Postgres has. No session, no model provider, no writes, and it
       # also runs on the instance itself rather than only at deploy time.
       - name: Post-deploy smoke check
+        if: steps.target.outputs.configured == 'true'
         env:
           APP_URL: ${{ vars.APP_URL }}
           EXPECTED_SHA: ${{ steps.sha.outputs.sha }}
