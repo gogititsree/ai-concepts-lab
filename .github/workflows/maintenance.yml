@@ -39,13 +39,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "${APP_URL:-}" ]; then
-            echo "::error::APP_URL repository variable is not set (see docs/github-setup.md)"
-            exit 1
-          fi
-          if [ -z "${MAINTENANCE_TOKEN:-}" ]; then
-            echo "::error::MAINTENANCE_TOKEN secret is not set (see docs/github-setup.md)"
-            exit 1
+          # Nothing deployed yet means nothing to sweep. Skip, do not fail.
+          #
+          # Same fix as deploy.yml and uptime.yml, and this one was missed on the first
+          # pass: it ran daily and failed daily, on a repository whose only fault was not
+          # having a Render service yet. A scheduled job that is always red teaches you to
+          # ignore it, and the day it fails for a real reason you will.
+          #
+          # docs/github-setup.md is what sets both of these.
+          if [ -z "${APP_URL:-}" ] || [ -z "${MAINTENANCE_TOKEN:-}" ]; then
+            echo "::notice::No deployment configured (APP_URL and/or MAINTENANCE_TOKEN unset), so there is nothing to sweep. Skipping. See docs/github-setup.md."
+            {
+              echo "### Maintenance skipped"
+              echo
+              echo "No deployment target is configured yet, so there is no database to sweep."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
           # --max-time 180: this request is very likely the one that wakes a sleeping
