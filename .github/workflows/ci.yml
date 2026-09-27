@@ -322,12 +322,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Retention, because a rolling tag still leaves the layers it replaced behind as
-      # untagged versions, and untagged versions still occupy the storage quota.
+      # Retention, because a rolling tag still leaves the versions it replaced behind and
+      # they still occupy the storage quota.
       #
-      # Keeps the newest few and deletes the rest. Best-effort: a failure here must not
-      # fail a build whose image is already published, so it is `continue-on-error`. If it
-      # stops working, storage grows slowly again rather than silently breaking a deploy.
+      # **`min-versions-to-keep` must stay comfortably above one image generation.** A
+      # multi-arch push is not one version: `main` is an OCI image *index*, and its
+      # platform manifest and provenance attestation are separate versions that GHCR
+      # reports as **untagged**. Today that is three versions for one working image. Prune
+      # to three and you keep exactly one generation with no margin; prune with
+      # `delete-only-untagged-versions: true` and you delete the current image's own
+      # children and break the tag you just pushed. Ten leaves room for a few generations
+      # and for a second platform being added later.
+      #
+      # Now that the package is public its storage is free, so this is tidiness rather
+      # than necessity — which is the right order of priorities: never risk breaking the
+      # published image to reclaim space that costs nothing.
+      #
+      # Best-effort: a failure here must not fail a build whose image is already
+      # published, so it is `continue-on-error`. Storage then grows slowly rather than a
+      # deploy breaking silently.
       - name: Prune old package versions
         if: github.event_name != 'pull_request'
         continue-on-error: true
@@ -336,5 +349,5 @@ jobs:
           owner: ${{ github.repository_owner }}
           package-name: ${{ github.event.repository.name }}
           package-type: container
-          min-versions-to-keep: 3
+          min-versions-to-keep: 10
           delete-only-untagged-versions: 'false'
