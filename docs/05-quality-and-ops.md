@@ -58,7 +58,9 @@ jobs:
     steps: pnpm build → migrate → seed → start API (serves SPA) → playwright test → upload trace on failure
   build-image:
     needs: [lint, unit, integration]
-    docker buildx build → push ghcr.io/<user>/ai-concepts-lab:<sha> (and :main on main)
+    docker buildx build → push ghcr.io/<user>/ai-concepts-lab:main (rolling), then prune old versions
+    (a per-commit :<sha> tag was dropped: nothing consumed it and it filled the free
+     package-storage quota in eleven pushes — see the CI comment)
 ```
 Caching: pnpm store, Playwright browsers, Docker layer cache (GHA cache backend).
 

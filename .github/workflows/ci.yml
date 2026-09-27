@@ -289,13 +289,22 @@ jobs:
 
       # metadata-action lowercases the image name (GHCR rejects uppercase) and only adds
       # the `main` tag on the default branch.
+      #
+      # **Only a rolling `main` tag.** This used to also push `type=raw,value=${{ github.sha }}`,
+      # which is an immutable tag per commit that nothing ever deleted — eleven pushes filled
+      # the free package-storage allowance, and the images are ~377 MB each.
+      #
+      # The per-commit tag had no consumer. `render.yaml` builds from the Dockerfile itself
+      # (ADR 0005), so nothing pulls this image; it exists to prove the image builds and to
+      # give a deployable artefact. A rolling tag does both at constant storage cost. If a
+      # per-commit image is ever genuinely needed, tag releases rather than every commit, and
+      # keep the prune step below.
       - name: Compute tags
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=${{ github.sha }}
             type=raw,value=main,enable={{is_default_branch}}
 
       - uses: docker/build-push-action@v7
@@ -312,3 +321,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Retention, because a rolling tag still leaves the layers it replaced behind as
+      # untagged versions, and untagged versions still occupy the storage quota.
+      #
+      # Keeps the newest few and deletes the rest. Best-effort: a failure here must not
+      # fail a build whose image is already published, so it is `continue-on-error`. If it
+      # stops working, storage grows slowly again rather than silently breaking a deploy.
+      - name: Prune old package versions
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: ${{ github.repository_owner }}
+          package-name: ${{ github.event.repository.name }}
+          package-type: container
+          min-versions-to-keep: 3
+          delete-only-untagged-versions: 'false'
